@@ -3,15 +3,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use regex::Regex;
-use tower::Layer;
+use tower::{Layer, Service};
 
 use liter_llm::auth::{Credential, CredentialProvider};
-use liter_llm::client::{BoxFuture, ClientConfigBuilder, DefaultClient};
+use liter_llm::client::{BoxFuture, ClientConfig, ClientConfigBuilder, DefaultClient};
 use liter_llm::error::LiterLlmError;
 use liter_llm::guardrail::GuardrailRegistry;
 use liter_llm::observability::{MultiUsageSink, UsageSinkErased};
 use liter_llm::tenant::TenantId;
-use liter_llm::tower::types::{LlmRequest, LlmResponse};
+use liter_llm::tower::types::{LlmRequest, LlmRequestKind, LlmResponse};
 use liter_llm::tower::{
     BudgetConfig, BudgetDimension, BudgetLayer, BudgetLedger, BudgetLedgerLayer, BudgetState, BudgetVerdict,
     CacheConfig, CacheLayer, CooldownLayer, CostCheckContext, CostTrackingLayer, EmbeddingSimilarityClassifier,
@@ -352,7 +352,7 @@ fn build_base_service(
         .map_err(|e| format!("failed to build router for deployment pool: {e}"))?
         .with_deployment_models(deployment_models);
 
-    let base: Bcs = tower::util::BoxCloneService::new(router);
+    let base = guard_classifier_credentials(tower::util::BoxCloneService::new(router), config)?;
     let client_arc = first_client.ok_or_else(|| "deployment pool must have at least one entry".to_string())?;
     Ok((base, client_arc))
 }
@@ -448,16 +448,61 @@ fn build_classifier_client(
     embedding_model: &str,
     config: &ProxyConfig,
 ) -> Result<DefaultClient, String> {
+    let client_config = classifier_client_config(api_key, base_url, config);
+    build_request_authenticated_client(client_config, embedding_model)
+        .map_err(|e| format!("failed to build routing.classifier embedding client: {e}"))
+}
+
+fn classifier_client_config(api_key: Option<&str>, base_url: Option<&str>, config: &ProxyConfig) -> ClientConfig {
     let mut builder = ClientConfigBuilder::new(api_key.unwrap_or(""));
     if let Some(url) = base_url {
         builder = builder.base_url(url);
     }
     builder = builder.timeout(Duration::from_secs(config.general.default_timeout_secs));
-    builder = builder.max_retries(config.general.max_retries);
-    let client_config = builder.build();
+    builder.max_retries(config.general.max_retries).build()
+}
 
-    DefaultClient::new(client_config, Some(embedding_model))
-        .map_err(|e| format!("failed to build routing.classifier embedding client: {e}"))
+fn missing_classifier_credentials(config: &ProxyConfig) -> Result<Option<Arc<MissingProviderCredentials>>, String> {
+    let Some(RoutingConfig::Semantic {
+        classifier:
+            ClassifierConfig::Embedding {
+                api_key,
+                base_url,
+                embedding_model,
+                ..
+            },
+    }) = &config.routing
+    else {
+        return Ok(None);
+    };
+    let client_config = classifier_client_config(api_key.as_deref(), base_url.as_deref(), config);
+    match DefaultClient::new(client_config, Some(embedding_model)) {
+        Err(LiterLlmError::Authentication { message, status }) => {
+            Ok(Some(Arc::new(MissingProviderCredentials { message, status })))
+        }
+        Ok(_) => Ok(None),
+        Err(error) => Err(format!("failed to build routing.classifier embedding client: {error}")),
+    }
+}
+
+// ~keep Classifiers intentionally defer transient failures. A missing configured
+// ~keep credential must instead fail routed chat requests before any upstream call.
+fn guard_classifier_credentials(base: Bcs, config: &ProxyConfig) -> Result<Bcs, String> {
+    let Some(credentials) = missing_classifier_credentials(config)? else {
+        return Ok(base);
+    };
+    Ok(tower::util::BoxCloneService::new(tower::service_fn(
+        move |request: LlmRequest| {
+            let mut service = base.clone();
+            let credentials = Arc::clone(&credentials);
+            async move {
+                if matches!(&request.kind, LlmRequestKind::Chat(_) | LlmRequestKind::ChatStream(_)) {
+                    credentials.resolve().await?;
+                }
+                service.call(request).await
+            }
+        },
+    )))
 }
 
 /// Build a `DefaultClient` from a `ModelEntry` and global config defaults.
@@ -474,16 +519,19 @@ fn build_client(entry: &ModelEntry, config: &ProxyConfig) -> Result<DefaultClien
     builder = builder.timeout(Duration::from_secs(timeout_secs));
     builder = builder.max_retries(config.general.max_retries);
 
-    let mut client_config = builder.build();
-    let client = match DefaultClient::new(client_config.clone(), Some(&entry.provider_model)) {
+    let client = build_request_authenticated_client(builder.build(), &entry.provider_model);
+    client.map_err(|e| format!("failed to build client for model '{}': {e}", entry.name))
+}
+
+fn build_request_authenticated_client(mut config: ClientConfig, model: &str) -> Result<DefaultClient, LiterLlmError> {
+    match DefaultClient::new(config.clone(), Some(model)) {
         Err(LiterLlmError::Authentication { message, status }) => {
-            client_config.load_env = false;
-            client_config.credential_provider = Some(Arc::new(MissingProviderCredentials { message, status }));
-            DefaultClient::new(client_config, Some(&entry.provider_model))
+            config.load_env = false;
+            config.credential_provider = Some(Arc::new(MissingProviderCredentials { message, status }));
+            DefaultClient::new(config, Some(model))
         }
         result => result,
-    };
-    client.map_err(|e| format!("failed to build client for model '{}': {e}", entry.name))
+    }
 }
 
 // ~keep Missing provider keys are request failures; the MCP catalog and local
@@ -1286,6 +1334,7 @@ action = { kind = "redact", replacement = "x" }
             ProxyConfig::from_toml_str("[[models]]\nname = 'gpt'\nprovider_model = 'openai/gpt-4o'\n").unwrap();
         let pool = ServicePool::from_config(&config, None).expect("missing credentials must not prevent startup");
         assert_eq!(pool.model_names(), vec!["gpt"]);
+        verify_classifier_credentials_request_only().await;
         let malformed =
             ProxyConfig::from_toml_str("[[models]]\nname = 'broken'\nprovider_model = 'azure/gpt-4o'\n").unwrap();
         let error = ServicePool::from_config(&malformed, None)
@@ -1321,5 +1370,107 @@ action = { kind = "redact", replacement = "x" }
             assert!(matches!(error, LiterLlmError::Authentication { status: 401, .. }));
         }
         assert_eq!(upstream.received_requests().await.unwrap().len(), 0);
+    }
+
+    async fn verify_classifier_credentials_request_only() {
+        use tower::ServiceExt;
+        let classifier = semantic_classifier_config();
+        let malformed = build_classifier_client(None, None, "azure/gpt-4o", &classifier)
+            .err()
+            .expect("malformed classifier providers must still fail startup");
+        assert!(malformed.contains("requires a base URL"));
+        let client = build_classifier_client(None, None, "openai/text-embedding-3-small", &classifier)
+            .expect("missing classifier credentials must not prevent startup");
+        let request =
+            serde_json::from_value(serde_json::json!({"model": "openai/text-embedding-3-small", "input": "probe"}))
+                .unwrap();
+        let error = LlmService::new_from_arc(Arc::new(client))
+            .oneshot(LlmRequest::Embed(request))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LiterLlmError::Authentication { status: 401, .. }));
+        assert!(error.to_string().contains("OPENAI_API_KEY"));
+        assert!(matches!(
+            build_routing_strategy(&classifier).unwrap(),
+            RoutingStrategy::Semantic(_)
+        ));
+        let upstream = wiremock::MockServer::start().await;
+        let mut routed = classifier.clone();
+        let mut deployment = config_with_one_model().models.remove(0);
+        deployment.name = "gpt".into();
+        deployment.base_url = Some(upstream.uri());
+        routed.models = vec![deployment.clone(), deployment];
+        let routed_pool =
+            ServicePool::from_config(&routed, None).expect("classifier credentials may be absent at startup");
+        let LlmRequestKind::Chat(chat) = chat_with("probe").kind else {
+            unreachable!()
+        };
+        for request in [LlmRequest::Chat(chat.clone()), LlmRequest::ChatStream(chat)] {
+            let error = routed_pool
+                .get_service("gpt")
+                .unwrap()
+                .oneshot(request)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, LiterLlmError::Authentication { status: 401, .. }));
+            assert!(error.to_string().contains("OPENAI_API_KEY"));
+        }
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 0);
+        verify_classifier_bypass_routes(&routed, &upstream).await;
+    }
+
+    async fn verify_classifier_bypass_routes(routed: &ProxyConfig, upstream: &wiremock::MockServer) {
+        use tower::ServiceExt;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"object": "list", "data": []})),
+            )
+            .mount(upstream)
+            .await;
+        let pool = ServicePool::from_config(routed, None).unwrap();
+        assert!(
+            pool.get_service("gpt")
+                .unwrap()
+                .oneshot(LlmRequest::ListModels())
+                .await
+                .is_ok()
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "probe", "object": "chat.completion", "created": 0, "model": "gpt-4o",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })))
+            .mount(upstream)
+            .await;
+        let mut single = routed.clone();
+        single.models.truncate(1);
+        let pool = ServicePool::from_config(&single, None).unwrap();
+        assert!(
+            pool.get_service("gpt")
+                .unwrap()
+                .oneshot(chat_with("probe"))
+                .await
+                .is_ok()
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+    }
+    fn semantic_classifier_config() -> ProxyConfig {
+        ProxyConfig::from_toml_str(
+            r#"
+[routing]
+strategy = "semantic"
+[routing.classifier]
+kind = "embedding"
+embedding_model = "openai/text-embedding-3-small"
+threshold = 0.75
+[[routing.classifier.prototypes]]
+name = "coding"
+model = "gpt"
+embedding = [1.0, 0.0, 0.0]
+"#,
+        )
+        .unwrap()
     }
 }
