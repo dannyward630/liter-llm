@@ -102,3 +102,35 @@ def test_tag_only_check_ignores_machine_code(tmp_path: Path) -> None:
 def test_empty_architecture_argument_reads_tags_only(tmp_path: Path) -> None:
     make_wheel(tmp_path, "win_amd64", {"a.pyd": LINUX_ELF})
     assert run(tmp_path, "win_amd64", "").returncode == 0
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def wheel_job() -> dict:
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github/workflows/publish.yaml").read_text())["jobs"]["build-python-wheels"]
+
+
+def test_release_builds_an_intel_macos_wheel_on_the_arm64_runner() -> None:
+    legs = {leg["label"]: leg for leg in wheel_job()["strategy"]["matrix"]["include"]}
+    intel = legs["macos-x86_64"]
+    assert intel["runner"] == "macos-latest"
+    assert intel["cibw_archs_macos"] == "x86_64"
+    assert intel["wheel_macho_arch"] == "x86_64"
+    assert intel["wheel_platform"] == "macosx_11_0_x86_64"
+    assert "rustup target add x86_64-apple-darwin" in intel["before_build_macos"]
+    build = next(step for step in wheel_job()["steps"] if "build-python-wheels" in step.get("uses", ""))
+    assert "macosx_x86_64" not in build["with"]["cibw-skip"]
+    assert "MACOSX_DEPLOYMENT_TARGET=11.0" in build["with"]["cibw-environment-macos"]
+
+
+def test_every_wheel_is_checked_before_it_is_uploaded() -> None:
+    steps = wheel_job()["steps"]
+    check = next(i for i, step in enumerate(steps) if "check_python_wheel.py" in step.get("run", ""))
+    upload = next(i for i, step in enumerate(steps) if "upload-artifact" in step.get("uses", ""))
+    build = next(i for i, step in enumerate(steps) if "build-python-wheels" in step.get("uses", ""))
+    assert build < check < upload
+    assert steps[build]["with"]["upload-artifact"] == "false"
+    assert steps[upload]["with"]["name"] == "python-wheel-${{ matrix.label }}"
