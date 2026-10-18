@@ -110,7 +110,13 @@ ROOT = Path(__file__).resolve().parents[2]
 def wheel_job() -> dict:
     import yaml
 
-    return yaml.safe_load((ROOT / ".github/workflows/publish.yaml").read_text())["jobs"]["build-python-wheels"]
+    return workflow("python-wheels.yaml")["jobs"]["build"]
+
+
+def workflow(name: str) -> dict:
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
 
 
 def test_release_builds_an_intel_macos_wheel_on_the_arm64_runner() -> None:
@@ -134,3 +140,20 @@ def test_every_wheel_is_checked_before_it_is_uploaded() -> None:
     assert build < check < upload
     assert steps[build]["with"]["upload-artifact"] == "false"
     assert steps[upload]["with"]["name"] == "python-wheel-${{ matrix.label }}"
+
+
+def test_release_and_pull_request_check_build_wheels_with_the_same_workflow() -> None:
+    release = workflow("publish.yaml")["jobs"]["build-python-wheels"]
+    check = workflow("ci-python-wheels.yaml")["jobs"]["wheels"]
+    assert release["uses"] == "./.github/workflows/python-wheels.yaml"
+    assert check["uses"] == "./.github/workflows/python-wheels.yaml"
+
+
+def test_pull_request_wheel_check_has_no_path_to_a_registry() -> None:
+    check = workflow("ci-python-wheels.yaml")
+    assert "pull_request" in check[True]
+    assert "secrets" not in check["jobs"]["wheels"]
+    assert check["permissions"] == {"contents": "read"}
+    reusable = (ROOT / ".github/workflows/python-wheels.yaml").read_text()
+    for word in ("secrets.", "id-token", "twine", "pypa/gh-action-pypi-publish", "maturin publish"):
+        assert word not in reusable
