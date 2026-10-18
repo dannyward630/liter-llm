@@ -12,6 +12,10 @@ Usage:
 Every file ``WHEEL_DIR/*.whl`` must have a platform tag that fully matches PLATFORM_TAG_REGEX.
 When MACHO_ARCH (``x86_64`` or ``arm64``) is given and not empty, every Mach-O file inside a wheel must contain
 that architecture and no other, and the wheel must hold at least one Mach-O file.
+
+A wheel with a macOS platform tag is never checked by its tag alone: the script exits 2 when it finds one and
+MACHO_ARCH is missing or empty, so a build step that loses the architecture fails instead of passing. Linux and
+Windows legs pass no MACHO_ARCH.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+EXPECTED_ARCHS = ("x86_64", "arm64")
 CPU_TYPES = {0x01000007: "x86_64", 0x0100000C: "arm64", 0x00000007: "i386", 0x0000000C: "arm"}
 THIN_MAGICS = {0xFEEDFACE: "<", 0xFEEDFACF: "<", 0xCEFAEDFE: ">", 0xCFFAEDFE: ">"}
 FAT_MAGICS = {0xCAFEBABE: ">", 0xCAFEBABF: ">"}
@@ -84,10 +89,22 @@ def main(argv: list[str]) -> int:
         return 2
     wheel_dir, tag_pattern = Path(argv[1]), argv[2]
     expected_arch = (argv[3] if len(argv) == 4 else "") or None
+    if expected_arch is not None and expected_arch not in EXPECTED_ARCHS:
+        print(f"::error::unknown architecture {expected_arch!r}, expected one of {EXPECTED_ARCHS}", file=sys.stderr)
+        return 2
     wheels = sorted(wheel_dir.glob("*.whl"))
     if not wheels:
         print(f"no wheel found in {wheel_dir}", file=sys.stderr)
         return 1
+    if expected_arch is None:
+        macos = [wheel.name for wheel in wheels if wheel.name[: -len(".whl")].split("-")[-1].startswith("macosx_")]
+        if macos:
+            print(
+                f"::error::{macos[0]} is a macOS wheel and no expected architecture was given; "
+                "refusing to check it by platform tag alone",
+                file=sys.stderr,
+            )
+            return 2
     problems = [problem for wheel in wheels for problem in check_wheel(wheel, tag_pattern, expected_arch)]
     for problem in problems:
         print(f"::error::{problem}")

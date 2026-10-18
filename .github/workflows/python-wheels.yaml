@@ -78,7 +78,8 @@ jobs:
       # ~keep A cross-compiled wheel is the one wheel whose name can lie: the platform tag comes
       # from cibuildwheel and the machine code from cargo. This step fails the leg, before the
       # upload, when the tag or any Mach-O file in the wheel is not what the leg promises.
-      # WHEEL_MACHO_ARCH is empty on legs that ship no Mach-O file, and the check then reads tags only.
+      # WHEEL_MACHO_ARCH is empty on Linux and Windows legs, and the check then reads tags only.
+      # The check exits 2 when a macOS wheel arrives with no architecture, so a lost value fails the leg.
       - name: Check wheel platform and architecture
         shell: bash
         env:
@@ -90,3 +91,4 @@ jobs:
           name: python-wheel-${{ matrix.label }}
           path: ./wheelhouse/*.whl
           retention-days: 7
+          if-no-files-found: error

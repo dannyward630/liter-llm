@@ -104,6 +104,22 @@ def test_empty_architecture_argument_reads_tags_only(tmp_path: Path) -> None:
     assert run(tmp_path, "win_amd64", "").returncode == 0
 
 
+def test_macos_wheel_is_refused_without_an_architecture(tmp_path: Path) -> None:
+    """A step that loses the architecture must fail, not fall back to reading the tag."""
+    make_wheel(tmp_path, "macosx_11_0_x86_64", {"a.so": thin(ARM64)})
+    for args in ((r"macosx_\d+_\d+_x86_64",), (r"macosx_\d+_\d+_x86_64", "")):
+        result = run(tmp_path, *args)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "no expected architecture" in result.stderr
+
+
+def test_unknown_architecture_is_refused(tmp_path: Path) -> None:
+    make_wheel(tmp_path, "macosx_11_0_x86_64", {"a.so": thin(X86_64)})
+    result = run(tmp_path, r"macosx_\d+_\d+_x86_64", "x86-64")
+    assert result.returncode == 2
+    assert "unknown architecture" in result.stderr
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -192,5 +208,95 @@ def test_release_job_builds_all_five_wheels_for_the_tag_and_uploads_them() -> No
 
 def test_pull_request_wheel_check_watches_the_crates_the_wheel_is_built_from() -> None:
     paths = workflow("ci-python-wheels.yaml")[True]["pull_request"]["paths"]
-    for watched in ("crates/liter-llm/**", "crates/liter-llm-py/**", "Cargo.toml", "Cargo.lock"):
+    for watched in ("crates/liter-llm/**", "crates/liter-llm-py/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
         assert watched in paths
+
+
+def test_pull_request_wheel_check_runs_only_in_this_repository() -> None:
+    assert "github.repository == 'xberg-io/liter-llm'" in workflow("ci-python-wheels.yaml")["jobs"]["wheels"]["if"]
+
+
+CONCRETE_TAGS = {
+    "linux-x86_64": "manylinux_2_28_x86_64",
+    "linux-aarch64": "manylinux_2_28_aarch64",
+    "macos-arm64": "macosx_11_0_arm64",
+    "macos-x86_64": "macosx_11_0_x86_64",
+    "windows-x86_64": "win_amd64",
+}
+
+
+def run_check_step(leg: dict, wheel_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the check step of the wheel job as the workflow wires it, with the leg's matrix values."""
+    step = next(s for s in wheel_job()["steps"] if "check_python_wheel.py" in s.get("run", ""))
+    env = {}
+    for name, expression in step["env"].items():
+        assert expression.startswith("${{ matrix."), expression
+        assert expression.endswith(" }}"), expression
+        env[name] = str(leg.get(expression[len("${{ matrix.") : -len(" }}")], ""))
+    bin_dir = wheel_dir / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").symlink_to(sys.executable)
+    (wheel_dir / "scripts").symlink_to(ROOT / "scripts")
+    wheelhouse = wheel_dir / "wheelhouse"
+    wheelhouse.mkdir()
+    for wheel in wheel_dir.glob("*.whl"):
+        wheel.rename(wheelhouse / wheel.name)
+    return subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=wheel_dir,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_check_step_gives_each_leg_its_own_architecture(tmp_path: Path) -> None:
+    """Drives the step the way the release runs it: the Intel leg must reject arm64 code."""
+    legs = {leg["label"]: leg for leg in wheel_job()["strategy"]["matrix"]["include"]}
+    assert set(legs) == set(CONCRETE_TAGS)
+    for label, leg in legs.items():
+        expected = {"x86_64": X86_64, "arm64": ARM64}.get(leg.get("wheel_macho_arch"))
+        code = thin(expected) if expected else LINUX_ELF
+        good = tmp_path / f"good-{label}"
+        good.mkdir()
+        make_wheel(good, CONCRETE_TAGS[label], {"liter_llm/_internal_bindings.abi3.so": code})
+        result = run_check_step(leg, good)
+        assert result.returncode == 0, (label, result.stdout + result.stderr)
+        if expected:
+            wrong = tmp_path / f"wrong-{label}"
+            wrong.mkdir()
+            other = ARM64 if expected == X86_64 else X86_64
+            make_wheel(wrong, CONCRETE_TAGS[label], {"liter_llm/_internal_bindings.abi3.so": thin(other)})
+            assert run_check_step(leg, wrong).returncode == 1, label
+
+
+def test_release_wheel_job_gets_no_registry_credentials() -> None:
+    release = workflow("publish.yaml")["jobs"]["build-python-wheels"]
+    assert "permissions" not in release
+    assert "secrets" not in release
+    assert workflow("python-wheels.yaml")["permissions"] == {"contents": "read"}
+
+
+def test_pypi_publish_downloads_the_wheels_the_build_uploads() -> None:
+    from fnmatch import fnmatchcase
+
+    publish = workflow("publish.yaml")["jobs"]["publish-pypi"]
+    assert "build-python-wheels" in publish["needs"]
+    assert "needs.build-python-wheels.result == 'success'" in publish["if"]
+    download = next(s for s in publish["steps"] if "download-artifact" in s.get("uses", ""))
+    assert download["with"]["merge-multiple"] is True
+    for label in CONCRETE_TAGS:
+        assert fnmatchcase(f"python-wheel-{label}", download["with"]["pattern"]), label
+
+
+def test_wheel_build_inputs_are_pinned() -> None:
+    job = wheel_job()
+    build = next(s for s in job["steps"] if "build-python-wheels" in s.get("uses", ""))["with"]
+    assert build["cibw-build"] == "cp310-*"
+    assert "--compatibility linux" in build["cibw-environment"]
+    assert (ROOT / build["package-dir"] / "pyproject.toml").is_file()
+    assert job["timeout-minutes"] == 90
+    upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert upload["with"]["retention-days"] == 7
+    assert upload["with"]["if-no-files-found"] == "error"

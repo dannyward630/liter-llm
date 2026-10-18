@@ -12,6 +12,7 @@ on:
       - "crates/liter-llm-py/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "scripts/ci/check_python_wheel.py"
       - ".github/workflows/python-wheels.yaml"
       - ".github/workflows/ci-python-wheels.yaml"
