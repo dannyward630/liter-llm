@@ -155,3 +155,42 @@ def test_pull_request_wheel_check_has_no_path_to_a_registry() -> None:
     reusable = (ROOT / ".github/workflows/python-wheels.yaml").read_text()
     for word in ("secrets.", "id-token", "twine", "pypa/gh-action-pypi-publish", "maturin publish"):
         assert word not in reusable
+
+
+RELEASE_WHEEL_LEGS = {
+    "linux-x86_64": ("ubuntu-latest", "auto", "manylinux.*_x86_64", None),
+    "linux-aarch64": ("ubuntu-24.04-arm", "auto", "manylinux.*_aarch64", None),
+    "macos-arm64": ("macos-latest", "arm64", "macosx_11_0_arm64", "arm64"),
+    "macos-x86_64": ("macos-latest", "x86_64", "macosx_11_0_x86_64", "x86_64"),
+    "windows-x86_64": ("windows-latest", "auto", "win_amd64", None),
+}
+
+
+def test_release_job_builds_all_five_wheels_for_the_tag_and_uploads_them() -> None:
+    release = workflow("publish.yaml")["jobs"]["build-python-wheels"]
+    assert release["uses"] == "./.github/workflows/python-wheels.yaml"
+    assert release["needs"] == ["prepare", "registry-results"]
+    assert release["with"] == {"checkout_ref": "${{ needs.prepare.outputs.checkout_ref }}"}
+    assert release["if"] == (
+        "${{ !inputs.plugins-only && (always() && needs.prepare.outputs.release_python == 'true'"
+        " && (needs.registry-results.outputs.pypi != 'true' || needs.prepare.outputs.force_republish == 'true')) }}"
+    )
+
+    job = wheel_job()
+    legs = {
+        leg["label"]: (leg["runner"], leg["cibw_archs_macos"], leg["wheel_platform"], leg.get("wheel_macho_arch"))
+        for leg in job["strategy"]["matrix"]["include"]
+    }
+    assert legs == RELEASE_WHEEL_LEGS
+    assert job["env"]["CIBW_ARCHS_MACOS"] == "${{ matrix.cibw_archs_macos }}"
+
+    checkout = next(step for step in job["steps"] if "actions/checkout" in step.get("uses", ""))
+    assert checkout["with"] == {"ref": "${{ inputs.checkout_ref }}"}
+    upload = next(step for step in job["steps"] if "upload-artifact" in step.get("uses", ""))
+    assert upload["with"]["path"] == "./wheelhouse/*.whl"
+
+
+def test_pull_request_wheel_check_watches_the_crates_the_wheel_is_built_from() -> None:
+    paths = workflow("ci-python-wheels.yaml")[True]["pull_request"]["paths"]
+    for watched in ("crates/liter-llm/**", "crates/liter-llm-py/**", "Cargo.toml", "Cargo.lock"):
+        assert watched in paths

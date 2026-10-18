@@ -8,7 +8,10 @@ on:
     branches: [main]
     paths:
       - "packages/python/**"
+      - "crates/liter-llm/**"
       - "crates/liter-llm-py/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "scripts/ci/check_python_wheel.py"
       - ".github/workflows/python-wheels.yaml"
       - ".github/workflows/ci-python-wheels.yaml"
