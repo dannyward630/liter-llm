@@ -69,7 +69,7 @@ jobs:
           # ~keep 11.0 is the floor of the arm64 wheel and of the FFI builds (#248). cibuildwheel
           # defaults an x86_64 build to 10.9, so without it the C objects of the build scripts
           # take the SDK's minos instead of the target the Rust objects use. The shared library
-          # then has minos 11.0, and delocate raises the wheel tag from 10.9 to macosx_11_0_x86_64.
+          # then has minos 11.0, and the wheel repair step raises the tag from 10.9 to macosx_11_0_x86_64.
           cibw-environment-macos: 'MATURIN_BUILD_ARGS="" CARGO_BUILD_LOCKED=true MACOSX_DEPLOYMENT_TARGET=11.0'
           cibw-before-build-macos: ${{ matrix.before_build_macos || 'pip install maturin uv && source ~/.cargo/env' }}
           # ~keep The action uploads after the build, so the check below would run too late.

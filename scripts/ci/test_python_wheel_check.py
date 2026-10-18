@@ -108,8 +108,6 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def wheel_job() -> dict:
-    import yaml
-
     return workflow("python-wheels.yaml")["jobs"]["build"]
 
 
