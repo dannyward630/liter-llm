@@ -277,10 +277,7 @@ fn registry_from_catalog_str(catalog_json: &str) -> std::result::Result<CatalogR
         }
     }
 
-    Ok(CatalogRegistry {
-        models: registry,
-        rows,
-    })
+    Ok(CatalogRegistry { models: registry, rows })
 }
 
 fn catalog_info_from_str(catalog_json: &str, origin: &str) -> std::result::Result<CatalogInfo, String> {

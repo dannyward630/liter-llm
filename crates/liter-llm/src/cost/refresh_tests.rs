@@ -481,7 +481,11 @@ async fn list_catalog_models_copies_every_field_of_each_catalog_entry() {
     clear_catalog_overlay();
 
     let all = list_catalog_models(None);
-    assert!(all.len() > 100, "the embedded catalog holds many models, got {}", all.len());
+    assert!(
+        all.len() > 100,
+        "the embedded catalog holds many models, got {}",
+        all.len()
+    );
     for entry in &all {
         let info = exact_model_info(&entry.key).unwrap_or_else(|| panic!("{} must resolve exactly", entry.key));
         let expected = CatalogModel {
@@ -553,7 +557,11 @@ async fn list_catalog_models_filters_by_exact_provider() {
     assert!(list_catalog_models(Some("no-such-provider")).is_empty());
     assert!(list_catalog_models(Some("Anthropic")).is_empty());
     assert!(list_catalog_models(Some("anthrop")).is_empty());
-    assert_eq!(list_catalog_models(Some("")), all, "an empty provider keeps every provider");
+    assert_eq!(
+        list_catalog_models(Some("")),
+        all,
+        "an empty provider keeps every provider"
+    );
 }
 
 /// A refreshed catalog is listed the way `model_info` reads it: its models win
