@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `provider` argument keeps the models of one catalog provider id, such as `openai`; a routing name from
   `all_providers` that is not a catalog id gives an empty list, and an empty `provider` keeps every provider (#310).
 
+### Fixed
+
+- `reasoning_effort: "none"` is now accepted by the typed `ReasoningEffort` field in every binding and reaches the server as `"none"` on OpenAI-compatible, Azure and Ollama endpoints. Anthropic and Bedrock send `thinking: {type: "disabled"}`, and Vertex AI and Gemini send a thinking budget of 0 (#301).
+- Publish an `abi3` Python wheel for Intel macOS (`macosx_11_0_x86_64`), cross-built on the arm64 runner, and fail the build when any wheel's platform tag or machine code is not the one its build leg promises. (#297)
+
 ## [2.3.0] - 2026-10-19
 
 ### Changed
