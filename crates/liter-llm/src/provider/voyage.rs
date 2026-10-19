@@ -40,13 +40,17 @@ impl Provider for VoyageProvider {
 
     /// Move the `data` array to `results`, and wrap string documents as `{ "text": ... }`.
     ///
-    /// A reply that already has `results` is left alone, so a Cohere-shaped reply
-    /// still parses.
+    /// A reply that already has a `results` value other than `null` is left alone, so a
+    /// Cohere-shaped reply still parses. A reply whose `data` is not an array is left
+    /// alone too and fails the parse as before. Items without an `index` or a
+    /// `relevance_score` stay as they are and fail the parse with an error that names
+    /// the field.
     fn transform_rerank_response(&self, body: &mut Value) -> Result<()> {
         let Some(obj) = body.as_object_mut() else {
             return Ok(());
         };
-        if obj.contains_key("results") {
+        if obj.get("results").is_some_and(|results| !results.is_null()) || !obj.get("data").is_some_and(Value::is_array)
+        {
             return Ok(());
         }
         let Some(mut data) = obj.remove("data") else {
@@ -149,5 +153,75 @@ mod tests {
         let mut body = original.clone();
         VoyageProvider.transform_response(&mut body).unwrap();
         assert_eq!(body, original);
+    }
+
+    #[test]
+    fn test_voyage_rerank_reply_that_is_not_an_object_is_left_alone() {
+        for original in [
+            json!([{"index": 0, "relevance_score": 0.9}]),
+            json!("text"),
+            json!(null),
+        ] {
+            let mut body = original.clone();
+            VoyageProvider
+                .transform_rerank_response(&mut body)
+                .expect("a reply that is not an object is not an error here");
+            assert_eq!(body, original);
+        }
+    }
+
+    #[test]
+    fn test_voyage_rerank_reply_with_null_results_uses_data() {
+        let mut body = json!({
+            "results": null,
+            "data": [{"index": 1, "relevance_score": 0.7}]
+        });
+        VoyageProvider.transform_rerank_response(&mut body).unwrap();
+        assert!(body.get("data").is_none());
+        assert_eq!(body["results"], json!([{"index": 1, "relevance_score": 0.7}]));
+    }
+
+    #[test]
+    fn test_voyage_rerank_reply_with_data_that_is_not_an_array_is_left_alone() {
+        for data in [json!(null), json!({"index": 0}), json!("text")] {
+            let original = json!({"data": data});
+            let mut body = original.clone();
+            VoyageProvider.transform_rerank_response(&mut body).unwrap();
+            assert_eq!(body, original);
+        }
+    }
+
+    #[test]
+    fn test_voyage_rerank_reply_with_empty_data_becomes_empty_results() {
+        let mut body = json!({"data": []});
+        VoyageProvider.transform_rerank_response(&mut body).unwrap();
+        assert_eq!(body, json!({"results": []}));
+    }
+
+    #[test]
+    fn test_voyage_rerank_reply_items_that_are_not_objects_do_not_panic() {
+        let mut body = json!({"data": [1, null, "x", [], {"index": 0, "relevance_score": 0.1, "document": 5}]});
+        VoyageProvider.transform_rerank_response(&mut body).unwrap();
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(5));
+        assert_eq!(body["results"][4]["document"], 5);
+    }
+
+    #[test]
+    fn test_voyage_prefix_is_case_sensitive_like_the_other_prefixes() {
+        use crate::provider::detect_builtin_provider;
+
+        let named = detect_builtin_provider("voyage/rerank-2").expect("voyage/ names a provider");
+        assert_eq!(named.name(), "voyage");
+        for model in [
+            "Voyage/rerank-2",
+            "VOYAGE/rerank-2",
+            "Cohere/rerank-v3.5",
+            "Azure/gpt-4o",
+        ] {
+            assert!(
+                detect_builtin_provider(model).is_none(),
+                "{model} must not name a provider"
+            );
+        }
     }
 }
