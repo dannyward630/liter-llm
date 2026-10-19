@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Limit a stream by the silence between chunks instead of its total time. `timeout_secs` (60 s by default) now ends a stream only when no data arrives for that long, so a long answer that keeps sending chunks completes. A call that returns one reply keeps the whole-request limit. A stalled stream still fails with the timeout error. (#314)
 - Validate canonical package versions during release dry runs while preserving genuine prerelease checks.
 - Keep public coding-agent skills synchronized with native plugin resources during version updates.
 
