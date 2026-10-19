@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Parse Voyage rerank replies, which list the scored documents under `data` instead of `results`, so `voyage/` rerank calls return the same `results` as other providers. The reply shape follows the model in the request, and a client that names Voyage as its `model_hint` reads Voyage replies for a bare model such as `rerank-2`. A custom provider that claims the `voyage/` prefix still decides where the request goes, but the reply is read as a Voyage reply. A `results: null` beside a valid `data` array parses from `data`. The `voyage/` prefix is case-sensitive, like every other provider prefix. (#306)
 - Rerank replies no longer pass through the chat transform of the provider that sends the request. This fixes `cohere/` rerank calls, whose replies the Cohere chat transform rebuilt without the `results` array, and any rerank call from a client pinned to a provider with a chat transform. (#306)
+- `reasoning_effort: "none"` is now accepted by the typed `ReasoningEffort` field in every binding and reaches the server as `"none"` on OpenAI-compatible, Azure and Ollama endpoints. Anthropic and Bedrock send `thinking: {type: "disabled"}`, and Vertex AI and Gemini send a thinking budget of 0 (#301).
+- Publish an `abi3` Python wheel for Intel macOS (`macosx_11_0_x86_64`), cross-built on the arm64 runner, and fail the build when any wheel's platform tag or machine code is not the one its build leg promises. (#297)
 
 ## [2.3.0] - 2026-10-19
 
