@@ -927,18 +927,42 @@ pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
         return Ok(Some(provider));
     }
     if let Ok(reg) = REGISTRY.as_ref()
-        && let Some((prefix, _)) = model.split_once('/')
-        && let Some(entry) = registry_entry_for_prefix(reg, prefix)
+        && let Some(error) = unrouted_provider_error(reg, model)
     {
-        return Err(LiterLlmError::BadRequest {
-            message: format!(
-                "provider `{}` has no built-in route; set base_url to its endpoint",
-                entry.config.name
-            ),
-            status: 400,
-        });
+        return Err(error);
     }
     Ok(None)
+}
+
+/// Refuse a bare `model_hint` that names a registry provider with no route.
+///
+/// A hint such as `snowflake` is checked like the `snowflake/` prefix of a model. It never
+/// selects a provider: a hint that has a route keeps falling back to [`OpenAiProvider`].
+///
+/// # Errors
+///
+/// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
+pub(crate) fn refuse_unrouted_hint(hint: &str) -> Result<()> {
+    if !hint.contains('/') {
+        route_model(&format!("{hint}/"))?;
+    }
+    Ok(())
+}
+
+/// The refusal for a model whose `provider/` prefix names a registry entry with no route.
+fn unrouted_provider_error(reg: &ProviderRegistry, model: &str) -> Option<LiterLlmError> {
+    let (prefix, _) = model.split_once('/')?;
+    let entry = registry_entry_for_prefix(reg, prefix)?;
+    if has_route(reg, entry) {
+        return None;
+    }
+    Some(LiterLlmError::BadRequest {
+        message: format!(
+            "provider `{}` has no built-in route; set base_url to its endpoint",
+            entry.config.name
+        ),
+        status: 400,
+    })
 }
 
 /// Detect which provider to use based on model name.
@@ -1440,6 +1464,74 @@ mod route_model_tests {
                 .unwrap_or_else(|e| panic!("{model}: {e}"))
                 .unwrap_or_else(|| panic!("{model}: no provider"));
             assert_eq!(provider.name(), expected, "{model}");
+        }
+    }
+
+    fn synthetic_registry(providers: serde_json::Value, complex: &[&str]) -> ProviderRegistry {
+        let raw: ProviderRegistryRaw =
+            serde_json::from_value(serde_json::json!({"providers": providers, "complex_providers": complex}))
+                .expect("synthetic registry should parse");
+        ProviderRegistry::from_raw(raw)
+    }
+
+    #[test]
+    fn registry_entry_without_base_url_is_refused_even_when_not_complex() {
+        let reg = synthetic_registry(
+            serde_json::json!([{"name": "plain", "aliases": ["plain_alias"]}]),
+            &[],
+        );
+        for model in ["plain/m", "plain_alias/m"] {
+            match unrouted_provider_error(&reg, model) {
+                Some(LiterLlmError::BadRequest { message, status }) => {
+                    assert_eq!(status, 400, "{model}");
+                    assert!(message.contains("`plain`") && message.contains("base_url"), "{message}");
+                }
+                other => panic!("{model}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn registry_entry_with_base_url_that_is_not_complex_has_a_route() {
+        let reg = synthetic_registry(
+            serde_json::json!([{"name": "plain", "base_url": "https://plain.example/v1"}]),
+            &[],
+        );
+        assert!(unrouted_provider_error(&reg, "plain/m").is_none());
+    }
+
+    #[test]
+    fn complex_registry_entry_with_base_url_is_refused() {
+        let reg = synthetic_registry(
+            serde_json::json!([{"name": "fancy", "base_url": "https://fancy.example/v1"}]),
+            &["fancy"],
+        );
+        assert!(unrouted_provider_error(&reg, "fancy/m").is_some());
+    }
+
+    #[test]
+    fn prefix_that_names_no_registry_entry_is_not_refused() {
+        let reg = synthetic_registry(serde_json::json!([{"name": "plain"}]), &[]);
+        assert!(unrouted_provider_error(&reg, "other/m").is_none());
+        assert!(unrouted_provider_error(&reg, "no-slash").is_none());
+    }
+
+    #[test]
+    fn bare_hint_is_refused_like_its_prefix() {
+        for hint in ["snowflake", "watsonx", "hosted_vllm"] {
+            match refuse_unrouted_hint(hint) {
+                Err(LiterLlmError::BadRequest { message, .. }) => {
+                    assert!(message.contains(&format!("`{hint}`")), "{message}");
+                }
+                other => panic!("{hint}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bare_hint_with_a_route_or_no_registry_entry_is_accepted() {
+        for hint in ["anthropic", "groq", "ollama", "gpt-4o", "some-local-model"] {
+            assert!(refuse_unrouted_hint(hint).is_ok(), "{hint}");
         }
     }
 

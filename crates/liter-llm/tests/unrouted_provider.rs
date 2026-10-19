@@ -380,3 +380,69 @@ async fn provider_without_route_works_with_a_base_url() {
     // A client hinted at the same provider builds too once a base_url is set.
     assert!(client(Some(&target.url), Some("snowflake/arctic")).is_ok());
 }
+
+#[tokio::test]
+#[serial]
+async fn client_with_a_bare_hint_for_a_provider_without_route_is_refused() {
+    let proxy = ProxyGuard::install();
+    for hint in ["snowflake", "watsonx", "hosted_vllm"] {
+        match client(None, Some(hint)) {
+            Err(LiterLlmError::BadRequest { message, status }) => {
+                assert_eq!(status, 400, "{hint}");
+                assert!(
+                    message.contains(&format!("`{hint}`")) && message.contains("base_url"),
+                    "{hint}: {message}"
+                );
+            }
+            Err(other) => panic!("{hint}: expected BadRequest, got {other:?}"),
+            Ok(_) => panic!("{hint}: expected a refusal"),
+        }
+    }
+    assert!(
+        proxy.spy.seen().is_empty(),
+        "no request may leave the process, saw {:?}",
+        proxy.spy.seen()
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn client_with_a_bare_hint_that_has_a_route_or_a_base_url_still_builds() {
+    let target = Spy::start(Some(CHAT_REPLY));
+    for hint in ["anthropic", "groq", "ollama", "gpt-4o", "some-local-model"] {
+        assert!(client(None, Some(hint)).is_ok(), "{hint} builds without a base_url");
+    }
+    let client = client(Some(&target.url), Some("snowflake")).expect("a base_url lifts the refusal");
+    let chat = client
+        .chat(request(
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+        ))
+        .await;
+    assert!(chat.is_ok(), "{chat:?}");
+    assert_eq!(target.seen().len(), 1, "one request to the base_url");
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_for_a_provider_without_route_reach_the_base_url() {
+    let target = Spy::start(None);
+    let client = client(Some(&target.url), None).expect("client");
+    let created = client
+        .create_response(request(serde_json::json!({"model": "snowflake/m", "input": "hi"})))
+        .await;
+    assert!(
+        !matches!(&created, Err(LiterLlmError::BadRequest { message, .. }) if message.contains("no built-in route")),
+        "a base_url lifts the refusal: {created:?}"
+    );
+    let streamed = client
+        .create_response_stream(request(serde_json::json!({"model": "snowflake/m", "input": "hi"})))
+        .await
+        .map(drop);
+    assert!(
+        !matches!(&streamed, Err(LiterLlmError::BadRequest { message, .. }) if message.contains("no built-in route")),
+        "a base_url lifts the refusal: {streamed:?}"
+    );
+    let seen = target.seen();
+    assert_eq!(seen.len(), 2, "create and stream each reach the base_url, saw {seen:?}");
+    assert!(seen.iter().all(|l| l.starts_with("POST ")), "saw {seen:?}");
+}

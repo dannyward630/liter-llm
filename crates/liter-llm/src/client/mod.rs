@@ -1249,6 +1249,7 @@ fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Result<Arc
         if let Some(p) = provider::route_model(model)? {
             return Ok(Arc::from(p));
         }
+        provider::refuse_unrouted_hint(model)?;
     }
 
     Ok(Arc::new(OpenAiProvider))
