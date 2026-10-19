@@ -1414,10 +1414,10 @@ mod route_model_tests {
                 let model = format!("{name}/some-model");
                 // A provider named by `provider/` either has a route or is refused.
                 // `Ok(None)` is the silent fall back to the OpenAI endpoint.
-                match route_model(&model) {
-                    Ok(None) => panic!("{model}: falls through to the default provider"),
-                    Ok(Some(_)) | Err(_) => {}
-                }
+                assert!(
+                    !matches!(route_model(&model), Ok(None)),
+                    "{model}: falls through to the default provider"
+                );
                 checked += 1;
             }
         }
