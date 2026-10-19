@@ -120,7 +120,10 @@ async fn stream_outlives_the_timeout_while_chunks_keep_arriving() {
         }
     }
     assert_eq!(text, "w0 w1 w2 w3 w4 w5 ");
-    assert!(started.elapsed() > Duration::from_secs(2), "the stream must outlast the timeout");
+    assert!(
+        started.elapsed() > Duration::from_secs(2),
+        "the stream must outlast the timeout"
+    );
 }
 
 #[tokio::test]
@@ -144,7 +147,10 @@ async fn stream_that_goes_silent_fails_with_the_timeout_error() {
     }
     let err = last_err.expect("a silent stream must fail");
     assert!(matches!(err, LiterLlmError::Timeout), "got {err:?}");
-    assert!(started.elapsed() < Duration::from_secs(10), "the stall must end at the idle limit");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the stall must end at the idle limit"
+    );
 }
 
 #[tokio::test]
