@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list_catalog_models(provider)` lists the models of the built-in catalog without a network call or an API key, in
+  every binding. Each entry has the full catalog name, the provider, the model, the mode, the token limits and the
+  ability flags. The list is sorted by name, covers an installed catalog refresh, and the optional `provider` argument
+  keeps the models of one provider id (#310).
+
 ## [2.3.0] - 2026-10-19
 
 ### Changed

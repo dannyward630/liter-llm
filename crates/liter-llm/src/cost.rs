@@ -180,7 +180,7 @@ impl From<&CatalogPricingTierRow> for PricingTier {
 /// Flatten one catalog model row into a [`ModelPricing`]. Models without a
 /// `pricing` object get the zero-cost [`Default`] rates while keeping their
 /// limits, mode, and capability metadata populated.
-fn flatten_model(model: &CatalogModelRow) -> ModelPricing {
+fn flatten_model(provider_id: &str, model_id: &str, model: &CatalogModelRow) -> ModelPricing {
     let (
         input_cost_per_token,
         output_cost_per_token,
@@ -205,6 +205,8 @@ fn flatten_model(model: &CatalogModelRow) -> ModelPricing {
     };
 
     ModelPricing {
+        provider: provider_id.to_owned(),
+        model_id: model_id.to_owned(),
         price_known: Some(model.pricing.as_ref().is_some_and(|pricing| {
             pricing.input_cost_per_token != 0.0
                 || pricing.output_cost_per_token != 0.0
@@ -251,7 +253,7 @@ fn registry_from_catalog_str(catalog_json: &str) -> std::result::Result<HashMap<
 
     for (provider_id, provider) in &catalog.providers {
         for (model_id, model) in &provider.models {
-            let pricing = flatten_model(model);
+            let pricing = flatten_model(provider_id, model_id, model);
             if PRIMARY_PROVIDERS.contains(&provider_id.as_str()) {
                 registry.entry(model_id.clone()).or_insert_with(|| pricing.clone());
             }
@@ -284,6 +286,14 @@ fn catalog_info_from_str(catalog_json: &str, origin: &str) -> std::result::Resul
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(alef, alef(skip))]
 pub struct ModelPricing {
+    /// Provider id of the catalog entry that supplied this model, e.g.
+    /// `"openai"`. Empty for a record built outside the catalog.
+    #[serde(default)]
+    pub provider: String,
+    /// Model id within that provider, e.g. `"gpt-4o"`. Empty for a record
+    /// built outside the catalog.
+    #[serde(default)]
+    pub model_id: String,
     /// Whether the catalog has meaningful per-token pricing for this model.
     #[serde(default)]
     pub price_known: Option<bool>,
@@ -772,6 +782,114 @@ pub fn exact_model_info(model: &str) -> Option<ModelInfo> {
         info.exact = true;
         Some(info)
     })
+}
+
+/// One model of the built-in catalog, as returned by [`list_catalog_models`].
+///
+/// An owned plain-data DTO. It carries what a model picker needs: the name,
+/// the provider, the mode and the limits and abilities. Prices stay behind
+/// [`model_info`], which accepts [`CatalogModel::key`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogModel {
+    /// Full catalog name, `"{provider}/{model}"`. [`model_info`] and
+    /// [`exact_model_info`] accept it unchanged.
+    pub key: String,
+    /// Provider id, e.g. `"openai"`.
+    pub provider: String,
+    /// Model id within the provider, e.g. `"gpt-4o"`.
+    pub model: String,
+    /// Best-effort operating mode, e.g. `"chat"`, `"embedding"`.
+    pub mode: Option<String>,
+    /// Total context window size in tokens (input + output).
+    pub max_tokens: Option<u64>,
+    /// Maximum input (prompt) tokens accepted.
+    pub max_input_tokens: Option<u64>,
+    /// Maximum output (completion) tokens the model can generate.
+    pub max_output_tokens: Option<u64>,
+    /// The model accepts image input.
+    pub supports_vision: Option<bool>,
+    /// The model supports tool / function calling.
+    pub supports_function_calling: Option<bool>,
+    /// The model supports extended-thinking / reasoning tokens.
+    pub supports_reasoning: Option<bool>,
+    /// The model supports JSON-mode or `response_format` structured output.
+    pub supports_structured_output: Option<bool>,
+    /// The model accepts audio input.
+    pub supports_audio_input: Option<bool>,
+    /// The model can generate audio output.
+    pub supports_audio_output: Option<bool>,
+    /// The model supports prompt caching.
+    pub supports_prompt_caching: Option<bool>,
+}
+
+impl CatalogModel {
+    fn from_pricing(pricing: &ModelPricing) -> Self {
+        CatalogModel {
+            key: format!("{}/{}", pricing.provider, pricing.model_id),
+            provider: pricing.provider.clone(),
+            model: pricing.model_id.clone(),
+            mode: pricing.mode.clone(),
+            max_tokens: pricing.max_tokens,
+            max_input_tokens: pricing.max_input_tokens,
+            max_output_tokens: pricing.max_output_tokens,
+            supports_vision: pricing.supports_vision,
+            supports_function_calling: pricing.supports_function_calling,
+            supports_reasoning: pricing.supports_reasoning,
+            supports_structured_output: pricing.supports_structured_output,
+            supports_audio_input: pricing.supports_audio_input,
+            supports_audio_output: pricing.supports_audio_output,
+            supports_prompt_caching: pricing.supports_prompt_caching,
+        }
+    }
+}
+
+/// List the models of the active model catalog without a network call.
+///
+/// Returns one [`CatalogModel`] per model, sorted by [`CatalogModel::key`].
+/// The bare aliases that [`model_info`] also resolves (`"gpt-4o"` for
+/// `"openai/gpt-4o"`) are not extra entries.
+///
+/// `provider` keeps the models of that provider id only, compared exactly and
+/// case-sensitively. `None` keeps every provider. An id the catalog does not
+/// hold gives an empty list.
+///
+/// The list reads the catalog that [`model_info`] reads: the embedded catalog,
+/// with the models of an installed runtime overlay (see
+/// [`refresh::refresh_catalog`]) replacing the embedded entries of the same key.
+/// Embedded models the overlay does not name stay listed.
+///
+/// Unlike [`list_models`](crate::LlmClient::list_models), this sends no
+/// request and needs no API key.
+#[must_use]
+pub fn list_catalog_models(provider: Option<&str>) -> Vec<CatalogModel> {
+    let mut models: BTreeMap<String, CatalogModel> = BTreeMap::new();
+    if let Some(embedded) = registry() {
+        collect_catalog_models(embedded, provider, &mut models);
+    }
+    if let Some(overlay) = refresh::overlay_registry() {
+        collect_catalog_models(&overlay, provider, &mut models);
+    }
+    models.into_values().collect()
+}
+
+/// Add the canonical entries of `registry` to `models`, replacing an entry of
+/// the same key. An entry is canonical when its key is the provider and the
+/// model id joined by a slash; the bare aliases of the primary providers are
+/// not.
+fn collect_catalog_models(
+    registry: &HashMap<String, ModelPricing>,
+    provider: Option<&str>,
+    models: &mut BTreeMap<String, CatalogModel>,
+) {
+    for (key, pricing) in registry {
+        if provider.is_some_and(|wanted| pricing.provider != wanted) {
+            continue;
+        }
+        let entry = CatalogModel::from_pricing(pricing);
+        if *key == entry.key {
+            models.insert(entry.key.clone(), entry);
+        }
+    }
 }
 
 /// Return provenance for the active runtime or embedded model catalog.
