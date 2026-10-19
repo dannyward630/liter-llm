@@ -1,4 +1,4 @@
-//! Integration tests for File, Batch, and Response CRUD operations.
+//! Integration tests for File, Batch, Response, and rerank operations.
 //!
 //! Each test starts a lightweight mock HTTP server, constructs a `DefaultClient`
 //! pointing at it, calls the relevant trait method, and verifies:
@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use liter_llm::client::config::ClientConfigBuilder;
-use liter_llm::client::{BatchClient, DefaultClient, FileClient, ResponseClient};
+use liter_llm::client::{BatchClient, DefaultClient, FileClient, LlmClient, LlmClientRaw, ResponseClient};
 use liter_llm::types::batch::{BatchListQuery, CreateBatchRequest};
 use liter_llm::types::files::FileListQuery;
+use liter_llm::types::rerank::{RerankDocument, RerankRequest};
 use liter_llm::types::responses::CreateResponseRequest;
 use liter_llm::{LiterLlmError, Result};
 
@@ -876,4 +877,167 @@ async fn response_object_deserializes_output_items() {
 
     assert_eq!(resp.output.len(), 1);
     assert_eq!(resp.output[0].item_type, "message");
+}
+
+fn rerank_request(model: &str) -> RerankRequest {
+    RerankRequest {
+        model: model.to_owned(),
+        query: "q".to_owned(),
+        documents: ["a", "b", "c"].map(|d| RerankDocument::Text(d.to_owned())).to_vec(),
+        ..Default::default()
+    }
+}
+
+fn voyage_rerank_reply() -> String {
+    serde_json::json!({
+        "object": "list",
+        "data": [
+            {"index": 2, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.5},
+            {"index": 1, "relevance_score": 0.1}
+        ],
+        "model": "rerank-2",
+        "usage": {"total_tokens": 3}
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn rerank_voyage_reply_with_data_array_parses_into_results() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: voyage_rerank_reply(),
+    }]);
+    let client = build_client(&mock);
+
+    let resp = client
+        .rerank(rerank_request("voyage/rerank-2"))
+        .await
+        .expect("a Voyage rerank reply should parse");
+
+    let order: Vec<u32> = resp.results.iter().map(|r| r.index).collect();
+    assert_eq!(order, vec![2, 0, 1]);
+    assert_eq!(resp.results[0].relevance_score, 0.9);
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/rerank");
+}
+
+#[tokio::test]
+async fn rerank_voyage_reply_parses_when_the_client_names_voyage_as_hint() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: voyage_rerank_reply(),
+    }]);
+    let config = ClientConfigBuilder::new("test-api-key")
+        .base_url(mock.url())
+        .max_retries(0)
+        .build();
+    let client = DefaultClient::new(config, Some("voyage")).expect("client creation should succeed");
+
+    let resp = client
+        .rerank(rerank_request("voyage/rerank-2"))
+        .await
+        .expect("a Voyage rerank reply should parse");
+
+    assert_eq!(resp.results.len(), 3);
+    let requests = mock.requests();
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "rerank-2");
+}
+
+#[tokio::test]
+async fn rerank_raw_voyage_reply_with_data_array_parses_and_keeps_the_raw_reply() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: voyage_rerank_reply(),
+    }]);
+    let client = build_client(&mock);
+
+    let exchange = client
+        .rerank_raw(rerank_request("voyage/rerank-2"))
+        .await
+        .expect("a Voyage rerank reply should parse");
+
+    assert_eq!(exchange.data.results.len(), 3);
+    let raw = exchange.raw_response.expect("raw reply is kept");
+    assert!(raw.get("data").is_some(), "the raw reply stays as the provider sent it");
+    assert!(raw.get("results").is_none());
+}
+
+#[tokio::test]
+async fn rerank_voyage_reply_with_document_strings_parses() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: serde_json::json!({
+            "object": "list",
+            "data": [{"index": 1, "relevance_score": 0.8, "document": "bravo"}],
+            "model": "rerank-2",
+            "usage": {"total_tokens": 3}
+        })
+        .to_string(),
+    }]);
+    let client = build_client(&mock);
+
+    let resp = client
+        .rerank(rerank_request("voyage/rerank-2"))
+        .await
+        .expect("a Voyage rerank reply with documents should parse");
+
+    assert_eq!(resp.results[0].document.as_ref().map(|d| d.text.as_str()), Some("bravo"));
+}
+
+#[tokio::test]
+async fn rerank_voyage_reply_with_results_array_still_parses() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: serde_json::json!({
+            "id": "r1",
+            "results": [{"index": 2, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.5}]
+        })
+        .to_string(),
+    }]);
+    let client = build_client(&mock);
+
+    let resp = client
+        .rerank(rerank_request("voyage/rerank-2"))
+        .await
+        .expect("a reply with a results array should parse");
+
+    assert_eq!(resp.results.len(), 2);
+}
+
+#[tokio::test]
+async fn rerank_cohere_reply_keeps_its_results_array() {
+    let mock = MockServer::start_with_routes(vec![MockRoute {
+        method: "POST".into(),
+        path_prefix: "/rerank".into(),
+        status: 200,
+        body: serde_json::json!({
+            "id": "r1",
+            "results": [{"index": 2, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.5}],
+            "meta": {"billed_units": {"search_units": 1}}
+        })
+        .to_string(),
+    }]);
+    let client = build_client(&mock);
+
+    let resp = client
+        .rerank(rerank_request("cohere/rerank-v3.5"))
+        .await
+        .expect("a Cohere rerank reply should parse");
+
+    let order: Vec<u32> = resp.results.iter().map(|r| r.index).collect();
+    assert_eq!(order, vec![2, 0]);
 }
