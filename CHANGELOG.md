@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list_catalog_models(provider)` lists the models of the built-in catalog without a network call or an API key, in
+  every binding. Each entry has the full catalog name, the provider, the model, the mode, the token limits and the
+  ability flags. The list is sorted by name in byte order and covers an installed catalog refresh. The optional
+  `provider` argument keeps the models of one catalog provider id, such as `openai`; a routing name from
+  `all_providers` that is not a catalog id gives an empty list, and an empty `provider` keeps every provider (#310).
+
 ### Fixed
 
 - `reasoning_effort: "none"` is now accepted by the typed `ReasoningEffort` field in every binding and reaches the server as `"none"` on OpenAI-compatible, Azure and Ollama endpoints. Anthropic and Bedrock send `thinking: {type: "disabled"}`, and Vertex AI and Gemini send a thinking budget of 0 (#301).
