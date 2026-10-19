@@ -993,7 +993,10 @@ async fn rerank_voyage_reply_with_document_strings_parses() {
         .await
         .expect("a Voyage rerank reply with documents should parse");
 
-    assert_eq!(resp.results[0].document.as_ref().map(|d| d.text.as_str()), Some("bravo"));
+    assert_eq!(
+        resp.results[0].document.as_ref().map(|d| d.text.as_str()),
+        Some("bravo")
+    );
 }
 
 #[tokio::test]
