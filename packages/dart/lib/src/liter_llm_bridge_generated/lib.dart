@@ -218,21 +218,24 @@ Future<ModelInfo?> exactModelInfo({required String model}) =>
 
 /// List the models of the active model catalog without a network call.
 ///
-/// Returns one `CatalogModel` per model, sorted by `CatalogModel.key`.
-/// The bare aliases that `model_info` also resolves (`"gpt-4o"` for
-/// `"openai/gpt-4o"`) are not extra entries.
+/// Returns one entry per model of the catalog, sorted by key in byte order:
+/// upper case sorts before lower case. A bare alias that the model lookup also
+/// accepts, such as "gpt-4o" for "openai/gpt-4o", is not an extra entry.
 ///
-/// `provider` keeps the models of that provider id only, compared exactly and
-/// case-sensitively. `null` keeps every provider. An id the catalog does not
-/// hold gives an empty list.
+/// The provider argument takes a catalog provider id, such as "openai" or
+/// "anthropic": the part of an entry key before the first slash. It is not a
+/// routing provider name from all_providers; only some routing names are also
+/// catalog ids. The listing keeps the models of that id only, compared exactly
+/// and case-sensitively. An id the catalog does not hold gives an empty list.
+/// When the provider is absent or empty, the listing keeps every provider.
 ///
-/// The list reads the catalog that `model_info` reads: the embedded catalog,
-/// with the models of an installed runtime overlay (see
-/// `refresh.refresh_catalog`) replacing the embedded entries of the same key.
-/// Embedded models the overlay does not name stay listed.
+/// The list reads the catalog that the model lookup reads: the embedded
+/// catalog, with the models of an installed catalog refresh replacing the
+/// embedded entries of the same key. Embedded models that the refresh does not
+/// name stay listed.
 ///
-/// Unlike `list_models`, this sends no
-/// request and needs no API key.
+/// The listing sends no request and needs no API key, unlike the model list
+/// call of a client.
 Future<List<CatalogModel>> listCatalogModels({String? provider}) =>
     RustLib.instance.api.crateListCatalogModels(provider: provider);
 
@@ -1453,17 +1456,17 @@ class CatalogInfo {
           origin == other.origin;
 }
 
-/// One model of the built-in catalog, as returned by [`list_catalog_models`].
+/// One model of the built-in catalog, as returned by the catalog listing.
 ///
 /// An owned plain-data DTO. It carries what a model picker needs: the name,
-/// the provider, the mode and the limits and abilities. Prices stay behind
-/// [`model_info`], which accepts [`CatalogModel::key`].
+/// the provider, the mode and the limits and abilities. The prices stay in the
+/// model lookup, which accepts the key of this entry unchanged.
 class CatalogModel {
-  /// Full catalog name, `"{provider}/{model}"`. [`model_info`] and
-  /// [`exact_model_info`] accept it unchanged.
+  /// Full catalog name, "provider/model". The model lookup and the exact
+  /// model lookup accept it unchanged.
   final String key;
 
-  /// Provider id, e.g. `"openai"`.
+  /// Catalog provider id, such as "openai".
   final String provider;
 
   /// Model id within the provider, e.g. `"gpt-4o"`.
