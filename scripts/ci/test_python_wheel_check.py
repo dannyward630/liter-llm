@@ -29,8 +29,8 @@ def fat(*cpus: int) -> bytes:
     return header + entries + bytes(64)
 
 
-def make_wheel(directory: Path, platform: str, members: dict[str, bytes]) -> Path:
-    wheel = directory / f"liter_llm-2.2.5-cp310-abi3-{platform}.whl"
+def make_wheel(directory: Path, platform: str, members: dict[str, bytes], version: str = "2.2.5") -> Path:
+    wheel = directory / f"liter_llm-{version}-cp310-abi3-{platform}.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for name, data in members.items():
             archive.writestr(name, data)
@@ -162,6 +162,22 @@ def test_one_macos_wheel_among_linux_wheels_needs_an_architecture(tmp_path: Path
     result = run(tmp_path, ".*")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "no expected architecture" in result.stderr
+
+
+def test_every_wheel_in_the_directory_is_checked(tmp_path: Path) -> None:
+    """A wrong wheel fails the check wherever it sorts in the directory, not only when it is read first."""
+    for wrong in ("2.2.5", "2.2.6"):
+        directory = tmp_path / wrong
+        directory.mkdir()
+        wheels = [
+            make_wheel(directory, "macosx_11_0_x86_64", {"a.so": thin(ARM64 if version == wrong else X86_64)}, version)
+            for version in ("2.2.5", "2.2.6")
+        ]
+        result = run(directory, r"macosx_\d+_\d+_x86_64", "x86_64")
+        assert result.returncode == 1, (wrong, result.stdout + result.stderr)
+        assert f"liter_llm-{wrong}-cp310-abi3-macosx_11_0_x86_64.whl: a.so has architectures ['arm64']" in result.stdout
+        for wheel in wheels:
+            assert f"checked {wheel.name}" in result.stdout, (wrong, wheel.name)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -319,8 +335,9 @@ def test_wheel_build_inputs_are_pinned() -> None:
 
 
 # The release path rests on five invariants, one test each. Each test reads the parsed workflows and compares
-# whole key sets and whole values, so any edit that breaks the invariant fails it, whatever shape the edit takes.
-# A key that no test expects on a guarded job or step is an error, not a value the test ignores.
+# whole key sets and whole values of the jobs and steps it guards. A key that no test expects on a guarded job or
+# step is an error, not a value the test ignores. Comments are labels and no test reads them. A step name is read
+# only where a test expects one named step, as the package listing of the PyPI job.
 
 PYPI_PUBLISH_CONDITION = (
     "${{ !inputs.plugins-only && (always() && needs.prepare.outputs.release_python == 'true'"
@@ -570,6 +587,207 @@ def matrix_context(leg: dict) -> dict[str, str]:
     """A leg's matrix values; a key that another leg sets and this one does not is empty, as in a real run."""
     names = {name for other in wheel_job()["strategy"]["matrix"]["include"] for name in other}
     return {f"matrix.{name}": str(leg.get(name, "")) for name in names}
+
+
+RELEASE_REF = "refs/tags/v9.9.9"
+EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+
+
+def render(node: object, context: dict[str, str]) -> object:
+    """A parsed workflow value as a run sees it: every `${{ }}` evaluated, a whole expression keeping its type."""
+    if isinstance(node, dict):
+        return {key: render(value, context) for key, value in node.items()}
+    if isinstance(node, list):
+        return [render(item, context) for item in node]
+    if not isinstance(node, str):
+        return node
+    if node.count("${{") == 1 and EXPRESSION.fullmatch(node.strip()):
+        return evaluate(node, context)
+    return EXPRESSION.sub(lambda match: str(evaluate(match.group(1), context)), node)
+
+
+def released(reference: str) -> str:
+    """An action reference with its release tag folded, so a major-version bump keeps the pins and `@main` does not."""
+    return re.sub(r"@v\d+(\.\d+)*$", "@vN", reference)
+
+
+def without_names(step: dict) -> dict:
+    return {key: value for key, value in step.items() if key != "name"}
+
+
+DEFAULT_MACOS_BEFORE_BUILD = "pip install maturin uv && source ~/.cargo/env"
+MACOS_BEFORE_BUILD = {
+    "macos-x86_64": DEFAULT_MACOS_BEFORE_BUILD + " && rustup target add x86_64-apple-darwin",
+}
+WHEEL_BUILD_INPUTS = {
+    "package-dir": "packages/python",
+    "cibw-build": "cp310-*",
+    "cibw-skip": "*-musllinux* *-win32 *-manylinux_i686",
+    "cibw-environment": 'MATURIN_BUILD_ARGS="--compatibility linux" CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc',
+    "cibw-environment-macos": 'MATURIN_BUILD_ARGS="" CARGO_BUILD_LOCKED=true MACOSX_DEPLOYMENT_TARGET=11.0',
+    "upload-artifact": "false",
+}
+CHECK_RUN = 'python scripts/ci/check_python_wheel.py wheelhouse "$WHEEL_PLATFORM" "$WHEEL_MACHO_ARCH"'
+
+
+def expected_leg(label: str) -> dict:
+    """The wheel job of one leg as the release runs it: every key and every value, names aside."""
+    runner, archs, platform, macho_arch = RELEASE_WHEEL_LEGS[label]
+    return {
+        "runs-on": runner,
+        "timeout-minutes": 90,
+        "env": {"CIBW_ARCHS_MACOS": archs},
+        "steps": [
+            {"uses": "actions/checkout@vN", "with": {"ref": RELEASE_REF}},
+            {
+                "uses": "xberg-io/actions/build-python-wheels@vN",
+                "with": {
+                    **WHEEL_BUILD_INPUTS,
+                    "cibw-before-build-macos": MACOS_BEFORE_BUILD.get(label, DEFAULT_MACOS_BEFORE_BUILD),
+                },
+            },
+            {
+                "shell": "bash",
+                "env": {"WHEEL_PLATFORM": platform, "WHEEL_MACHO_ARCH": macho_arch or ""},
+                "run": CHECK_RUN,
+            },
+            {
+                "uses": "actions/upload-artifact@vN",
+                "with": {
+                    "name": f"python-wheel-{label}",
+                    "path": "./wheelhouse/*.whl",
+                    "retention-days": 7,
+                    "if-no-files-found": "error",
+                },
+            },
+        ],
+    }
+
+
+def test_every_leg_runs_every_release_step_as_pinned() -> None:
+    """Each leg's job and steps, rendered with its matrix values, equal the pinned leg: a skipped, absorbed or changed
+    step fails, and a new leg falls under the same pins once it has a row in the leg table."""
+    job = wheel_job()
+    legs = job["strategy"]["matrix"]["include"]
+    assert sorted(leg["label"] for leg in legs) == sorted(RELEASE_WHEEL_LEGS)
+    for leg in legs:
+        context = {**matrix_context(leg), "inputs.checkout_ref": RELEASE_REF}
+        rendered = render({key: value for key, value in job.items() if key not in {"name", "strategy"}}, context)
+        assert isinstance(rendered, dict)
+        rendered["steps"] = [without_names(step) for step in rendered["steps"]]
+        for step in rendered["steps"]:
+            if "uses" in step:
+                step["uses"] = released(step["uses"])
+        assert rendered == expected_leg(leg["label"]), leg["label"]
+
+
+RECHECK_CONDITION = "steps.recheck.outputs.exists != 'true' || needs.prepare.outputs.force_republish == 'true'"
+
+
+def test_pypi_job_steps_cannot_be_skipped_or_absorb_a_failure() -> None:
+    """Every step of the PyPI job, names aside: no step may be skipped by a new condition or absorb its failure."""
+    publish = publish_pypi_job()
+    assert publish["needs"] == [
+        "prepare",
+        "validate-versions",
+        "registry-results",
+        "build-python-wheels",
+        "build-python-sdist",
+    ]
+    assert publish["runs-on"] == "ubuntu-latest"
+    assert publish["environment"] == {"name": "pypi", "url": "https://pypi.org/p/liter-llm"}
+    steps = [without_names(step) for step in publish["steps"]]
+    for step in steps:
+        if "uses" in step:
+            step["uses"] = released(step["uses"])
+    directory = steps[1].get("with", {}).get("path")
+    assert isinstance(directory, str)
+    assert directory
+    published = steps[3].get("with", {}).get("packages-dir")
+    assert isinstance(published, str)
+    assert posixpath.normpath(published) == posixpath.normpath(directory)
+    assert steps == [
+        {
+            "uses": "xberg-io/actions/check-registry@vN",
+            "id": "recheck",
+            "with": {"registry": "pypi", "package": "liter-llm", "version": "${{ needs.prepare.outputs.version }}"},
+        },
+        {
+            "if": RECHECK_CONDITION,
+            "uses": "actions/download-artifact@vN",
+            "with": {"pattern": "python-*", "path": directory, "merge-multiple": True},
+        },
+        {"if": RECHECK_CONDITION, "run": LIST_PACKAGES_RUN, "shell": "bash"},
+        {
+            "if": f"needs.prepare.outputs.dry_run != 'true' && ({RECHECK_CONDITION})",
+            "uses": "xberg-io/actions/publish-pypi@vN",
+            "with": {
+                "packages-dir": published,
+                "dry-run": "${{ needs.prepare.outputs.dry_run }}",
+                "expected-version": "${{ needs.prepare.outputs.pypi_version }}",
+            },
+        },
+    ]
+
+
+def test_prepare_hands_the_wheel_path_its_own_release_facts() -> None:
+    """The outputs the wheel build and the PyPI job read come from the metadata step, not from a fixed value."""
+    outputs = workflow("publish.yaml")["jobs"]["prepare"]["outputs"]
+    for name in ("tag", "checkout_ref", "version", "dry_run", "force_republish", "release_python"):
+        assert outputs[name] == f"${{{{ steps.meta.outputs.{name} }}}}", name
+
+
+CHECKED_PATHS = [
+    "packages/python/**",
+    "crates/liter-llm/**",
+    "crates/liter-llm-py/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "scripts/ci/check_python_wheel.py",
+    ".github/workflows/python-wheels.yaml",
+    ".github/workflows/ci-python-wheels.yaml",
+]
+
+
+def test_pull_request_check_runs_on_every_pull_request_to_main_that_edits_the_wheel_path() -> None:
+    """The check's triggers and its one job, whole: another base branch or a narrower filter fails."""
+    check = workflow("ci-python-wheels.yaml")
+    assert check[True] == {"pull_request": {"branches": ["main"], "paths": CHECKED_PATHS}, "workflow_dispatch": None}
+    assert without_names(check["jobs"]["wheels"]) == {
+        "if": "github.repository == 'xberg-io/liter-llm' && github.actor != 'dependabot[bot]'",
+        "uses": "./.github/workflows/python-wheels.yaml",
+    }
+
+
+RELEASE_REGRESSIONS_PYTEST = shlex.split("uv run --locked --only-group dev --python 3.14 python -m pytest -q")
+
+
+def test_release_regression_task_and_job_fail_when_this_file_fails() -> None:
+    """The task runs pytest on named test files and nothing that absorbs its exit code; the CI job cannot be skipped
+    or absorb its failure either."""
+    import yaml
+
+    task = yaml.safe_load((ROOT / "Taskfile.yml").read_text())["tasks"]["test:release-regressions"]
+    assert set(task) == {"desc", "cmds"}
+    assert all(isinstance(command, str) for command in task["cmds"])
+    (pytest_run,) = (shlex.split(command) for command in task["cmds"] if "pytest" in command)
+    assert pytest_run[: len(RELEASE_REGRESSIONS_PYTEST)] == RELEASE_REGRESSIONS_PYTEST
+    files = pytest_run[len(RELEASE_REGRESSIONS_PYTEST) :]
+    for name in files:
+        assert re.fullmatch(r"scripts/ci/test_\w+\.py", name), name
+        assert (ROOT / name).is_file(), name
+    assert Path(__file__).resolve().relative_to(ROOT).as_posix() in files
+
+    lint = workflow("ci-lint.yaml")
+    assert lint[True]["pull_request"]["branches"] == ["main"]
+    job = lint["jobs"]["release-regressions"]
+    assert set(job) == {"name", "runs-on", "steps"}
+    for step in job["steps"]:
+        assert set(step) <= {"name", "uses", "with", "run", "shell"}, step
+    assert [without_names(step) for step in job["steps"] if "run" in step] == [
+        {"run": "task test:release-regressions", "shell": "bash"}
+    ]
 
 
 def test_each_leg_runs_on_the_runner_its_wheel_is_built_for() -> None:
