@@ -35,18 +35,34 @@ const PRIMARY_PROVIDERS: [&str; 3] = ["anthropic", "google", "openai"];
 /// Lazy-initialised registry flattened from the embedded catalog JSON.
 /// Stores a `Result` so that parse failures surface at call time rather than
 /// panicking the process (mirrors the pattern used in `provider/mod.rs`).
-static PRICING: LazyLock<std::result::Result<HashMap<String, ModelPricing>, String>> =
+static PRICING: LazyLock<std::result::Result<CatalogRegistry, String>> =
     LazyLock::new(|| registry_from_catalog_str(CATALOG_JSON));
 static EMBEDDED_CATALOG_INFO: LazyLock<std::result::Result<CatalogInfo, String>> =
     LazyLock::new(|| catalog_info_from_str(CATALOG_JSON, "embedded"));
 
-/// Access the flattened pricing registry, returning `None` if the embedded
+/// A flattened catalog: every model by name, and the provider id and model id
+/// of each catalog row.
+#[derive(Debug)]
+pub(crate) struct CatalogRegistry {
+    /// Models by `"{provider_id}/{model_id}"` key, plus the bare `"{model_id}"`
+    /// key for [`PRIMARY_PROVIDERS`].
+    models: HashMap<String, ModelPricing>,
+    /// The provider id and the model id of each catalog row, once per row.
+    rows: Vec<(String, String)>,
+}
+
+/// Access the flattened embedded catalog, returning `None` if the embedded
 /// catalog JSON was invalid.
 ///
 /// Invalid embedded JSON is a compile-time defect; callers treat it the same
 /// as an unknown model (no pricing available).
-fn registry() -> Option<&'static HashMap<String, ModelPricing>> {
+fn embedded_catalog() -> Option<&'static CatalogRegistry> {
     PRICING.as_ref().ok()
+}
+
+/// The models of the embedded catalog by name. See [`embedded_catalog`].
+fn registry() -> Option<&'static HashMap<String, ModelPricing>> {
+    embedded_catalog().map(|catalog| &catalog.models)
 }
 
 /// Shape of the embedded `schemas/catalog.json`, ignoring the `$provenance`
@@ -180,7 +196,7 @@ impl From<&CatalogPricingTierRow> for PricingTier {
 /// Flatten one catalog model row into a [`ModelPricing`]. Models without a
 /// `pricing` object get the zero-cost [`Default`] rates while keeping their
 /// limits, mode, and capability metadata populated.
-fn flatten_model(provider_id: &str, model_id: &str, model: &CatalogModelRow) -> ModelPricing {
+fn flatten_model(model: &CatalogModelRow) -> ModelPricing {
     let (
         input_cost_per_token,
         output_cost_per_token,
@@ -205,8 +221,6 @@ fn flatten_model(provider_id: &str, model_id: &str, model: &CatalogModelRow) -> 
     };
 
     ModelPricing {
-        provider: provider_id.to_owned(),
-        model_id: model_id.to_owned(),
         price_known: Some(model.pricing.as_ref().is_some_and(|pricing| {
             pricing.input_cost_per_token != 0.0
                 || pricing.output_cost_per_token != 0.0
@@ -247,21 +261,26 @@ fn flatten_model(provider_id: &str, model_id: &str, model: &CatalogModelRow) -> 
 /// overlay refresh (`cost::refresh`) — both flatten the same catalog shape
 /// with identical logic, so a runtime-downloaded `catalog.json` behaves
 /// exactly like the embedded one.
-fn registry_from_catalog_str(catalog_json: &str) -> std::result::Result<HashMap<String, ModelPricing>, String> {
+fn registry_from_catalog_str(catalog_json: &str) -> std::result::Result<CatalogRegistry, String> {
     let catalog: CatalogFile = serde_json::from_str(catalog_json).map_err(|e| e.to_string())?;
     let mut registry = HashMap::new();
+    let mut rows = Vec::new();
 
     for (provider_id, provider) in &catalog.providers {
         for (model_id, model) in &provider.models {
-            let pricing = flatten_model(provider_id, model_id, model);
+            let pricing = flatten_model(model);
             if PRIMARY_PROVIDERS.contains(&provider_id.as_str()) {
                 registry.entry(model_id.clone()).or_insert_with(|| pricing.clone());
             }
             registry.insert(format!("{provider_id}/{model_id}"), pricing);
+            rows.push((provider_id.clone(), model_id.clone()));
         }
     }
 
-    Ok(registry)
+    Ok(CatalogRegistry {
+        models: registry,
+        rows,
+    })
 }
 
 fn catalog_info_from_str(catalog_json: &str, origin: &str) -> std::result::Result<CatalogInfo, String> {
@@ -286,14 +305,6 @@ fn catalog_info_from_str(catalog_json: &str, origin: &str) -> std::result::Resul
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(alef, alef(skip))]
 pub struct ModelPricing {
-    /// Provider id of the catalog entry that supplied this model, e.g.
-    /// `"openai"`. Empty for a record built outside the catalog.
-    #[serde(default)]
-    pub provider: String,
-    /// Model id within that provider, e.g. `"gpt-4o"`. Empty for a record
-    /// built outside the catalog.
-    #[serde(default)]
-    pub model_id: String,
     /// Whether the catalog has meaningful per-token pricing for this model.
     #[serde(default)]
     pub price_known: Option<bool>,
@@ -784,17 +795,17 @@ pub fn exact_model_info(model: &str) -> Option<ModelInfo> {
     })
 }
 
-/// One model of the built-in catalog, as returned by [`list_catalog_models`].
+/// One model of the built-in catalog, as returned by the catalog listing.
 ///
 /// An owned plain-data DTO. It carries what a model picker needs: the name,
-/// the provider, the mode and the limits and abilities. Prices stay behind
-/// [`model_info`], which accepts [`CatalogModel::key`].
+/// the provider, the mode and the limits and abilities. The prices stay in the
+/// model lookup, which accepts the key of this entry unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CatalogModel {
-    /// Full catalog name, `"{provider}/{model}"`. [`model_info`] and
-    /// [`exact_model_info`] accept it unchanged.
+    /// Full catalog name, "provider/model". The model lookup and the exact
+    /// model lookup accept it unchanged.
     pub key: String,
-    /// Provider id, e.g. `"openai"`.
+    /// Catalog provider id, such as "openai".
     pub provider: String,
     /// Model id within the provider, e.g. `"gpt-4o"`.
     pub model: String,
@@ -823,11 +834,11 @@ pub struct CatalogModel {
 }
 
 impl CatalogModel {
-    fn from_pricing(pricing: &ModelPricing) -> Self {
+    fn from_row(key: String, provider: &str, model: &str, pricing: &ModelPricing) -> Self {
         CatalogModel {
-            key: format!("{}/{}", pricing.provider, pricing.model_id),
-            provider: pricing.provider.clone(),
-            model: pricing.model_id.clone(),
+            key,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
             mode: pricing.mode.clone(),
             max_tokens: pricing.max_tokens,
             max_input_tokens: pricing.max_input_tokens,
@@ -845,25 +856,29 @@ impl CatalogModel {
 
 /// List the models of the active model catalog without a network call.
 ///
-/// Returns one [`CatalogModel`] per model, sorted by [`CatalogModel::key`].
-/// The bare aliases that [`model_info`] also resolves (`"gpt-4o"` for
-/// `"openai/gpt-4o"`) are not extra entries.
+/// Returns one entry per model of the catalog, sorted by key in byte order:
+/// upper case sorts before lower case. A bare alias that the model lookup also
+/// accepts, such as "gpt-4o" for "openai/gpt-4o", is not an extra entry.
 ///
-/// `provider` keeps the models of that provider id only, compared exactly and
-/// case-sensitively. `None` keeps every provider. An id the catalog does not
-/// hold gives an empty list.
+/// The provider argument takes a catalog provider id, such as "openai" or
+/// "anthropic": the part of an entry key before the first slash. It is not a
+/// routing provider name from all_providers; only some routing names are also
+/// catalog ids. The listing keeps the models of that id only, compared exactly
+/// and case-sensitively. An id the catalog does not hold gives an empty list.
+/// When the provider is absent or empty, the listing keeps every provider.
 ///
-/// The list reads the catalog that [`model_info`] reads: the embedded catalog,
-/// with the models of an installed runtime overlay (see
-/// [`refresh::refresh_catalog`]) replacing the embedded entries of the same key.
-/// Embedded models the overlay does not name stay listed.
+/// The list reads the catalog that the model lookup reads: the embedded
+/// catalog, with the models of an installed catalog refresh replacing the
+/// embedded entries of the same key. Embedded models that the refresh does not
+/// name stay listed.
 ///
-/// Unlike [`list_models`](crate::LlmClient::list_models), this sends no
-/// request and needs no API key.
+/// The listing sends no request and needs no API key, unlike the model list
+/// call of a client.
 #[must_use]
 pub fn list_catalog_models(provider: Option<&str>) -> Vec<CatalogModel> {
+    let provider = provider.filter(|id| !id.is_empty());
     let mut models: BTreeMap<String, CatalogModel> = BTreeMap::new();
-    if let Some(embedded) = registry() {
+    if let Some(embedded) = embedded_catalog() {
         collect_catalog_models(embedded, provider, &mut models);
     }
     if let Some(overlay) = refresh::overlay_registry() {
@@ -872,20 +887,23 @@ pub fn list_catalog_models(provider: Option<&str>) -> Vec<CatalogModel> {
     models.into_values().collect()
 }
 
-/// Add the models of `registry` to `models`, replacing an entry of the same
-/// key. The key comes from the provider and the model id, so a bare alias of a
-/// primary provider maps to the key of its canonical entry and adds nothing.
+/// Add one entry for each catalog row of `catalog` to `models`, replacing an
+/// entry of the same key. Bare aliases are not catalog rows.
 fn collect_catalog_models(
-    registry: &HashMap<String, ModelPricing>,
+    catalog: &CatalogRegistry,
     provider: Option<&str>,
     models: &mut BTreeMap<String, CatalogModel>,
 ) {
-    for pricing in registry.values() {
-        if provider.is_some_and(|wanted| pricing.provider != wanted) {
-            continue;
+    let rows = catalog
+        .rows
+        .iter()
+        .filter(|(provider_id, _)| provider.is_none_or(|wanted| provider_id == wanted));
+    for (provider_id, model_id) in rows {
+        let key = format!("{provider_id}/{model_id}");
+        if let Some(pricing) = catalog.models.get(&key) {
+            let entry = CatalogModel::from_row(key.clone(), provider_id, model_id, pricing);
+            models.insert(key, entry);
         }
-        let entry = CatalogModel::from_pricing(pricing);
-        models.insert(entry.key.clone(), entry);
     }
 }
 
@@ -917,7 +935,7 @@ fn model_info_in(reg: &HashMap<String, ModelPricing>, model: &str) -> Option<Mod
 /// explicit, successful refresh this is always the embedded table.
 fn with_active_registry<T>(mut f: impl FnMut(&HashMap<String, ModelPricing>) -> Option<T>) -> Option<T> {
     if let Some(overlay) = refresh::overlay_registry()
-        && let Some(value) = f(&overlay)
+        && let Some(value) = f(&overlay.models)
     {
         return Some(value);
     }
