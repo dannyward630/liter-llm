@@ -25,3 +25,10 @@ fn the_crate_root_filters_by_exact_provider_id() {
     assert!(list_catalog_models(Some("Anthropic")).is_empty());
     assert!(list_catalog_models(Some("no-such-provider")).is_empty());
 }
+
+#[test]
+fn an_empty_provider_lists_every_provider() {
+    let all = list_catalog_models(None);
+    assert!(!all.is_empty());
+    assert_eq!(list_catalog_models(Some("")), all);
+}

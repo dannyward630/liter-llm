@@ -472,9 +472,68 @@ async fn list_catalog_models_reads_the_embedded_catalog_without_aliases() {
     }
 }
 
+/// Every field of every listed entry equals the same field of the exact model
+/// lookup for its key. The lookup projects the catalog row through its own
+/// code, so a field the listing drops or swaps fails here.
+#[tokio::test]
+async fn list_catalog_models_copies_every_field_of_each_catalog_entry() {
+    let _guard = OVERLAY_TEST_LOCK.lock().await;
+    clear_catalog_overlay();
+
+    let all = list_catalog_models(None);
+    assert!(all.len() > 100, "the embedded catalog holds many models, got {}", all.len());
+    for entry in &all {
+        let info = exact_model_info(&entry.key).unwrap_or_else(|| panic!("{} must resolve exactly", entry.key));
+        let expected = CatalogModel {
+            key: info.matched_key.clone(),
+            provider: entry.key.split_once('/').map(|(p, _)| p.to_owned()).unwrap_or_default(),
+            model: entry.key.split_once('/').map(|(_, m)| m.to_owned()).unwrap_or_default(),
+            mode: info.mode,
+            max_tokens: info.max_tokens,
+            max_input_tokens: info.max_input_tokens,
+            max_output_tokens: info.max_output_tokens,
+            supports_vision: info.supports_vision,
+            supports_function_calling: info.supports_function_calling,
+            supports_reasoning: info.supports_reasoning,
+            supports_structured_output: info.supports_structured_output,
+            supports_audio_input: info.supports_audio_input,
+            supports_audio_output: info.supports_audio_output,
+            supports_prompt_caching: info.supports_prompt_caching,
+        };
+        assert_eq!(entry, &expected, "every field of {}", entry.key);
+    }
+
+    // ~keep The catalog row of anthropic/claude-haiku-4-5: context 200000, no
+    // ~keep input limit (the context applies), output 64000, mode chat, and
+    // ~keep every ability on except audio input and audio output.
+    let haiku = all
+        .iter()
+        .find(|m| m.key == "anthropic/claude-haiku-4-5")
+        .expect("anthropic/claude-haiku-4-5 must be listed");
+    assert_eq!(
+        haiku,
+        &CatalogModel {
+            key: "anthropic/claude-haiku-4-5".to_owned(),
+            provider: "anthropic".to_owned(),
+            model: "claude-haiku-4-5".to_owned(),
+            mode: Some("chat".to_owned()),
+            max_tokens: Some(200_000),
+            max_input_tokens: Some(200_000),
+            max_output_tokens: Some(64_000),
+            supports_vision: Some(true),
+            supports_function_calling: Some(true),
+            supports_reasoning: Some(true),
+            supports_structured_output: Some(true),
+            supports_audio_input: Some(false),
+            supports_audio_output: Some(false),
+            supports_prompt_caching: Some(true),
+        }
+    );
+}
+
 /// The filter keeps the models of exactly one provider id. A provider that the
 /// catalog does not hold, a different letter case and a prefix of a real id
-/// all return an empty list.
+/// all return an empty list. An empty provider is no filter.
 #[tokio::test]
 async fn list_catalog_models_filters_by_exact_provider() {
     let _guard = OVERLAY_TEST_LOCK.lock().await;
@@ -494,6 +553,7 @@ async fn list_catalog_models_filters_by_exact_provider() {
     assert!(list_catalog_models(Some("no-such-provider")).is_empty());
     assert!(list_catalog_models(Some("Anthropic")).is_empty());
     assert!(list_catalog_models(Some("anthrop")).is_empty());
+    assert_eq!(list_catalog_models(Some("")), all, "an empty provider keeps every provider");
 }
 
 /// A refreshed catalog is listed the way `model_info` reads it: its models win
