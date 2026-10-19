@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `list_catalog_models(provider)` lists the models of the built-in catalog without a network call or an API key, in
   every binding. Each entry has the full catalog name, the provider, the model, the mode, the token limits and the
-  ability flags. The list is sorted by name, covers an installed catalog refresh, and the optional `provider` argument
-  keeps the models of one provider id (#310).
+  ability flags. The list is sorted by name in byte order and covers an installed catalog refresh. The optional
+  `provider` argument keeps the models of one catalog provider id, such as `openai`; a routing name from
+  `all_providers` that is not a catalog id gives an empty list, and an empty `provider` keeps every provider (#310).
 
 ## [2.3.0] - 2026-10-19
 
