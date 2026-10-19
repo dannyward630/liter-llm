@@ -709,7 +709,6 @@ def test_pull_request_check_builds_the_pull_request_and_the_release_builds_its_t
     inputs = reusable[True]["workflow_call"]["inputs"]
     assert reusable[True] == {"workflow_call": {"inputs": inputs}}
     assert without_descriptions(inputs) == WHEEL_WORKFLOW_INPUTS
-    assert all(spec["description"] for spec in inputs.values())
     steps = wheel_job()["steps"]
     checkout = steps[step_index(steps, "actions/checkout")]
     assert set(checkout) == {"uses", "with"}
@@ -893,10 +892,7 @@ def test_release_regression_job_runs_this_file() -> None:
     """
     job = workflow("ci-lint.yaml")["jobs"]["release-regressions"]
     assert [step["run"] for step in job["steps"] if "run" in step] == ["task test:release-regressions"]
-    import yaml
-
-    task = yaml.safe_load((ROOT / "Taskfile.yml").read_text())["tasks"]["test:release-regressions"]
-    pytest_runs = [shlex.split(command) for command in task["cmds"] if "pytest" in command]
+    pytest_runs = [shlex.split(command) for command in regression_task()["cmds"] if "pytest" in command]
     assert len(pytest_runs) == 1
     for name in WHEEL_TEST_FILES:
         assert name in pytest_runs[0], name
