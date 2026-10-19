@@ -953,8 +953,9 @@ pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
 /// 7. `"provider/"` prefix — look up the prefix in the registry.
 /// 8. Walk all registry entries and check their `model_prefixes`.
 ///
-/// Returns `None` when no built-in provider matches.  The caller should fall
-/// back to a config-specified `base_url` or default to [`OpenAiProvider`].
+/// Returns `None` when no built-in provider matches.  Callers without a `base_url` use
+/// [`route_model`], which refuses a registry provider that has no route before the caller
+/// defaults to [`OpenAiProvider`].
 ///
 /// Complex providers (those listed in `complex_providers` in providers.json)
 /// are excluded from config-driven routing because they require custom

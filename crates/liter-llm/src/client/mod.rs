@@ -882,6 +882,8 @@ impl DefaultClient {
     ///
     /// Returns `LiterLlmError::Authentication` if `load_env` is enabled, no explicit
     /// API key was provided, and the provider's environment variable is unset or empty.
+    /// Returns `LiterLlmError::BadRequest` if no `base_url` is set and `model_hint` names a
+    /// registry provider that has no route of its own.
     /// Returns `LiterLlmError::InvalidHeader` if pre-validated headers somehow
     /// become invalid during client construction (extremely rare; indicates a bug).
     /// Returns `LiterLlmError::Http` if the underlying HTTP client cannot be constructed.
