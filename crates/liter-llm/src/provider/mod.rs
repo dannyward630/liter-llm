@@ -1476,10 +1476,7 @@ mod route_model_tests {
 
     #[test]
     fn registry_entry_without_base_url_is_refused_even_when_not_complex() {
-        let reg = synthetic_registry(
-            serde_json::json!([{"name": "plain", "aliases": ["plain_alias"]}]),
-            &[],
-        );
+        let reg = synthetic_registry(serde_json::json!([{"name": "plain", "aliases": ["plain_alias"]}]), &[]);
         for model in ["plain/m", "plain_alias/m"] {
             match unrouted_provider_error(&reg, model) {
                 Some(LiterLlmError::BadRequest { message, status }) => {

@@ -264,6 +264,9 @@ api_key = "sk-test"
 
         let message = outcome.expect_err("startup must fail");
         assert!(message.contains("failed to build client for model 'm1'"), "{message}");
-        assert!(message.contains("provider `snowflake` has no built-in route"), "{message}");
+        assert!(
+            message.contains("provider `snowflake` has no built-in route"),
+            "{message}"
+        );
     }
 }

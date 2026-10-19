@@ -807,7 +807,10 @@ api_key = "sk-test"
             .err()
             .expect("the client must not build");
         assert!(message.contains("failed to build client for model 'm1'"), "{message}");
-        assert!(message.contains("provider `snowflake` has no built-in route"), "{message}");
+        assert!(
+            message.contains("provider `snowflake` has no built-in route"),
+            "{message}"
+        );
         let pool_error = ServicePool::from_config(&config, None)
             .err()
             .expect("the pool must not build");
