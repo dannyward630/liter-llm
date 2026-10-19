@@ -6,7 +6,12 @@
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use liter_llm::{ChatCompletionRequest, ClientConfigBuilder, DefaultClient, LiterLlmError, LlmClient};
+use liter_llm::client::{BoxStream, ResponseClient};
+use liter_llm::types::responses::{CreateResponseRequest, ResponseStreamEvent};
+use liter_llm::{
+    ChatCompletionChunk, ChatCompletionRequest, ClientConfigBuilder, DefaultClient, LiterLlmError, LlmClient,
+    LlmClientRaw,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -21,15 +26,114 @@ struct Script {
     chunks: usize,
     /// When true the server sends the first chunk, then stays silent and never finishes.
     stall_after_first: bool,
+    /// How the events are framed on the wire.
+    wire: Wire,
 }
 
-fn sse(delta: serde_json::Value, finish: Option<&str>) -> Vec<u8> {
-    let chunk = serde_json::json!({
-        "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-    });
-    let data = format!("data: {chunk}\n\n");
-    format!("{:x}\r\n{data}\r\n", data.len()).into_bytes()
+/// The three wire formats the streaming entry points read.
+#[derive(Clone, Copy)]
+enum Wire {
+    /// Chat completion chunks as server-sent events.
+    ChatSse,
+    /// Responses API events as server-sent events.
+    ResponsesSse,
+    /// Bedrock binary event stream frames.
+    EventStream,
+}
+
+fn chunked(data: &[u8]) -> Vec<u8> {
+    let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// One Bedrock event stream frame with string headers.
+fn frame(event_type: &str, payload: &str) -> Vec<u8> {
+    let mut headers = Vec::new();
+    for (name, value) in [(":message-type", "event"), (":event-type", event_type)] {
+        headers.push(name.len() as u8);
+        headers.extend_from_slice(name.as_bytes());
+        headers.push(7);
+        headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        headers.extend_from_slice(value.as_bytes());
+    }
+    let total = 12 + headers.len() + payload.len() + 4;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(total as u32).to_be_bytes());
+    out.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+    let prelude_crc = crc32(&out[..8]);
+    out.extend_from_slice(&prelude_crc.to_be_bytes());
+    out.extend_from_slice(&headers);
+    out.extend_from_slice(payload.as_bytes());
+    let message_crc = crc32(&out);
+    out.extend_from_slice(&message_crc.to_be_bytes());
+    out
+}
+
+/// A content event carrying `text`, in the wire format of the script.
+fn text_event(wire: Wire, text: &str) -> Vec<u8> {
+    match wire {
+        Wire::ChatSse => {
+            let chunk = serde_json::json!({
+                "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": null}],
+            });
+            chunked(format!("data: {chunk}\n\n").as_bytes())
+        }
+        Wire::ResponsesSse => {
+            let event = serde_json::json!({
+                "type": "response.output_text.delta",
+                "item_id": "i1", "output_index": 0, "content_index": 0, "delta": text,
+            });
+            chunked(format!("data: {event}\n\n").as_bytes())
+        }
+        Wire::EventStream => {
+            let payload = serde_json::json!({"contentBlockIndex": 0, "delta": {"text": text}});
+            chunked(&frame("contentBlockDelta", &payload.to_string()))
+        }
+    }
+}
+
+/// The closing events and the end of the chunked body.
+fn closing(wire: Wire) -> Vec<u8> {
+    let mut out = match wire {
+        Wire::ChatSse => {
+            let chunk = serde_json::json!({
+                "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            });
+            let mut o = chunked(format!("data: {chunk}\n\n").as_bytes());
+            o.extend(chunked(b"data: [DONE]\n\n"));
+            o
+        }
+        Wire::ResponsesSse => chunked(b"data: [DONE]\n\n"),
+        Wire::EventStream => chunked(&frame("messageStop", r#"{"stopReason":"end_turn"}"#)),
+    };
+    out.extend_from_slice(b"0\r\n\r\n");
+    out
+}
+
+fn content_type(wire: Wire) -> &'static str {
+    match wire {
+        Wire::ChatSse | Wire::ResponsesSse => "text/event-stream",
+        Wire::EventStream => "application/vnd.amazon.eventstream",
+    }
 }
 
 async fn serve_one(mut sock: TcpStream, script: Script) {
@@ -43,13 +147,14 @@ async fn serve_one(mut sock: TcpStream, script: Script) {
         }
     }
     tokio::time::sleep(script.header_pause).await;
-    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n\r\n",
+        content_type(script.wire)
+    );
     if sock.write_all(head.as_bytes()).await.is_err() {
         return;
     }
-    let _ = sock
-        .write_all(&sse(serde_json::json!({"role": "assistant", "content": ""}), None))
-        .await;
+    let _ = sock.write_all(&text_event(script.wire, "")).await;
     if script.stall_after_first {
         tokio::time::sleep(Duration::from_secs(30)).await;
         return;
@@ -57,18 +162,14 @@ async fn serve_one(mut sock: TcpStream, script: Script) {
     for i in 0..script.chunks {
         tokio::time::sleep(script.chunk_pause).await;
         if sock
-            .write_all(&sse(serde_json::json!({"content": format!("w{i} ")}), None))
+            .write_all(&text_event(script.wire, &format!("w{i} ")))
             .await
             .is_err()
         {
             return;
         }
     }
-    let _ = sock.write_all(&sse(serde_json::json!({}), Some("stop"))).await;
-    let done = "data: [DONE]\n\n";
-    let _ = sock
-        .write_all(format!("{:x}\r\n{done}\r\n0\r\n\r\n", done.len()).as_bytes())
-        .await;
+    let _ = sock.write_all(&closing(script.wire)).await;
 }
 
 async fn start(script: Script) -> String {
@@ -107,6 +208,7 @@ async fn stream_outlives_the_timeout_while_chunks_keep_arriving() {
         chunk_pause: Duration::from_millis(400),
         chunks: 6,
         stall_after_first: false,
+        wire: Wire::ChatSse,
     })
     .await;
     let c = client(base, Duration::from_secs(1));
@@ -133,6 +235,7 @@ async fn stream_that_goes_silent_fails_with_the_timeout_error() {
         chunk_pause: Duration::ZERO,
         chunks: 0,
         stall_after_first: true,
+        wire: Wire::ChatSse,
     })
     .await;
     let c = client(base, Duration::from_millis(500));
@@ -160,9 +263,188 @@ async fn stream_with_no_response_headers_fails_with_the_timeout_error() {
         chunk_pause: Duration::ZERO,
         chunks: 0,
         stall_after_first: false,
+        wire: Wire::ChatSse,
     })
     .await;
     let c = client(base, Duration::from_millis(500));
     let result = c.chat_stream(request()).await;
     assert!(matches!(result, Err(LiterLlmError::Timeout)), "got {:?}", result.err());
 }
+
+/// The streaming entry points besides `chat_stream`.
+#[derive(Clone, Copy)]
+enum Entry {
+    ChatRaw,
+    Responses,
+    #[cfg(feature = "bedrock")]
+    Bedrock,
+    #[cfg(feature = "bedrock")]
+    BedrockRaw,
+}
+
+const BEDROCK_MODEL: &str = "bedrock/anthropic.claude-3-haiku-20240307-v1:0";
+
+fn chunk_text(chunk: &ChatCompletionChunk) -> String {
+    chunk
+        .choices
+        .first()
+        .and_then(|c| c.delta.content.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "bedrock")]
+fn bedrock_client(base: String, timeout: Duration) -> DefaultClient {
+    let mut config = ClientConfigBuilder::new("").load_env(false).base_url(base).build();
+    config.timeout = timeout;
+    config.max_retries = 0;
+    config.bedrock_region = Some("us-east-1".into());
+    config.bedrock_access_key_id = Some("key".into());
+    config.bedrock_secret_access_key = Some("secret".into());
+    DefaultClient::new(config, Some(BEDROCK_MODEL)).unwrap()
+}
+
+/// Open the stream of `entry` and map every item to its text.
+async fn open(entry: Entry, base: String, timeout: Duration) -> BoxStream<'static, Result<String, LiterLlmError>> {
+    match entry {
+        Entry::ChatRaw => {
+            let raw = client(base, timeout)
+                .chat_stream_raw(request())
+                .await
+                .expect("stream opens");
+            Box::pin(raw.stream.map(|r| r.map(|c| chunk_text(&c))))
+        }
+        Entry::Responses => {
+            let req = CreateResponseRequest {
+                model: "m".into(),
+                input: serde_json::json!("hi"),
+                instructions: None,
+                tools: None,
+                temperature: None,
+                max_output_tokens: None,
+                metadata: None,
+                extra_body: None,
+                stream: None,
+            };
+            let stream = client(base, timeout)
+                .create_response_stream(req)
+                .await
+                .expect("stream opens");
+            Box::pin(stream.map(|r| {
+                r.map(|e| match e {
+                    ResponseStreamEvent::OutputTextDelta(d) => d.delta,
+                    _ => String::new(),
+                })
+            }))
+        }
+        #[cfg(feature = "bedrock")]
+        Entry::Bedrock => {
+            let mut req = request();
+            req.model = BEDROCK_MODEL.into();
+            let stream = bedrock_client(base, timeout)
+                .chat_stream(req)
+                .await
+                .expect("stream opens");
+            Box::pin(stream.map(|r| r.map(|c| chunk_text(&c))))
+        }
+        #[cfg(feature = "bedrock")]
+        Entry::BedrockRaw => {
+            let mut req = request();
+            req.model = BEDROCK_MODEL.into();
+            let raw = bedrock_client(base, timeout)
+                .chat_stream_raw(req)
+                .await
+                .expect("stream opens");
+            Box::pin(raw.stream.map(|r| r.map(|c| chunk_text(&c))))
+        }
+    }
+}
+
+async fn healthy_stream_outlives_the_timeout(entry: Entry, wire: Wire) {
+    // 6 chunks, 400 ms apart: about 2.4 s in total, against a 1 s timeout.
+    let base = start(Script {
+        header_pause: Duration::ZERO,
+        chunk_pause: Duration::from_millis(400),
+        chunks: 6,
+        stall_after_first: false,
+        wire,
+    })
+    .await;
+    let started = Instant::now();
+    let mut stream = open(entry, base, Duration::from_secs(1)).await;
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        text.push_str(&item.expect("a healthy stream must not fail"));
+    }
+    assert_eq!(text, "w0 w1 w2 w3 w4 w5 ");
+    assert!(
+        started.elapsed() > Duration::from_secs(2),
+        "the stream must outlast the timeout"
+    );
+}
+
+async fn silent_stream_fails_with_the_timeout_error(entry: Entry, wire: Wire) {
+    let base = start(Script {
+        header_pause: Duration::ZERO,
+        chunk_pause: Duration::ZERO,
+        chunks: 0,
+        stall_after_first: true,
+        wire,
+    })
+    .await;
+    let started = Instant::now();
+    let mut stream = open(entry, base, Duration::from_millis(500)).await;
+    let mut last_err = None;
+    while let Some(item) = stream.next().await {
+        if let Err(e) = item {
+            last_err = Some(e);
+            break;
+        }
+    }
+    let err = last_err.expect("a silent stream must fail");
+    assert!(matches!(err, LiterLlmError::Timeout), "got {err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the stall must end at the idle limit"
+    );
+}
+
+macro_rules! idle_tests {
+    ($healthy:ident, $silent:ident, $entry:expr, $wire:expr) => {
+        #[tokio::test]
+        async fn $healthy() {
+            healthy_stream_outlives_the_timeout($entry, $wire).await;
+        }
+
+        #[tokio::test]
+        async fn $silent() {
+            silent_stream_fails_with_the_timeout_error($entry, $wire).await;
+        }
+    };
+}
+
+idle_tests!(
+    raw_chat_stream_outlives_the_timeout,
+    raw_chat_stream_that_goes_silent_fails,
+    Entry::ChatRaw,
+    Wire::ChatSse
+);
+idle_tests!(
+    responses_stream_outlives_the_timeout,
+    responses_stream_that_goes_silent_fails,
+    Entry::Responses,
+    Wire::ResponsesSse
+);
+#[cfg(feature = "bedrock")]
+idle_tests!(
+    bedrock_stream_outlives_the_timeout,
+    bedrock_stream_that_goes_silent_fails,
+    Entry::Bedrock,
+    Wire::EventStream
+);
+#[cfg(feature = "bedrock")]
+idle_tests!(
+    bedrock_raw_stream_outlives_the_timeout,
+    bedrock_raw_stream_that_goes_silent_fails,
+    Entry::BedrockRaw,
+    Wire::EventStream
+);
