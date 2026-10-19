@@ -1083,6 +1083,22 @@ fn model_uses_max_completion_tokens(model: &str) -> bool {
 }
 
 #[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// Map a rerank reply onto the canonical `results` shape.
+///
+/// The mapping belongs to the provider that the request model names, even when a
+/// `base_url` override pins a generic provider for the client: the override only
+/// says where to send the request, not how that endpoint words its reply. A
+/// provider whose reply already has the canonical shape leaves it unchanged, so a
+/// gateway that normalizes replies is not affected. A model that names no
+/// provider uses the client's own provider.
+fn transform_rerank_reply(pinned: &dyn Provider, model: &str, raw: &mut serde_json::Value) -> Result<()> {
+    match provider::detect_provider(model) {
+        Some(named) => named.transform_rerank_response(raw),
+        None => pinned.transform_rerank_response(raw),
+    }
+}
+
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
 /// Resolve the provider to use for all requests on this client.
 ///
 /// Priority:
@@ -1518,7 +1534,7 @@ impl LlmClient for DefaultClient {
                 self.response_read_options(),
             )
             .await?;
-            prepared.provider.transform_response(&mut raw)?;
+            transform_rerank_reply(prepared.provider.as_ref(), &req.model, &mut raw)?;
             serde_json::from_value::<RerankResponse>(raw).map_err(LiterLlmError::from)
         })
     }
@@ -1907,7 +1923,7 @@ impl LlmClientRaw for DefaultClient {
             .await?;
 
             let raw_response = Some(raw.clone());
-            prepared.provider.transform_response(&mut raw)?;
+            transform_rerank_reply(prepared.provider.as_ref(), &req.model, &mut raw)?;
             let data = serde_json::from_value::<RerankResponse>(raw).map_err(LiterLlmError::from)?;
 
             Ok(RawExchange {

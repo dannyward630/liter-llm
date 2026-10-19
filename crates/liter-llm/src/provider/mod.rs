@@ -469,6 +469,17 @@ pub(crate) trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Transform the raw rerank reply before deserialization into `RerankResponse`.
+    ///
+    /// The canonical shape is a top-level `results` array. Providers whose rerank
+    /// reply differs (a different key, a different `document` form) override this
+    /// to reshape it. Rerank replies do not pass through [`Provider::transform_response`]:
+    /// that step reshapes chat replies, and a chat transform applied to a rerank
+    /// reply discards the `results` array. The default is a no-op.
+    fn transform_rerank_response(&self, _body: &mut serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
     /// Build the full URL for a specific endpoint and model.
     ///
     /// Default: `{base_url}{endpoint_path}`.  Providers like Azure and Bedrock
@@ -606,6 +617,7 @@ pub(crate) mod google_ai;
 pub(crate) mod mistral;
 pub mod outbound_policy;
 pub(crate) mod vertex;
+pub(crate) mod voyage;
 
 #[cfg(all(feature = "native-http", not(target_arch = "wasm32")))]
 pub use outbound_policy::configure_outbound_client_builder;
@@ -955,6 +967,10 @@ pub(crate) fn detect_provider(model: &str) -> Option<Box<dyn Provider>> {
         || model.starts_with("mistral/")
     {
         return Some(Box::new(mistral::MistralProvider));
+    }
+
+    if model.starts_with("voyage/") {
+        return Some(Box::new(voyage::VoyageProvider));
     }
 
     if model.starts_with("github_copilot/") {

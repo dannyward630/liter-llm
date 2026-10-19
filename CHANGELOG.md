@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Parse Voyage rerank replies, which list the scored documents under `data` instead of `results`, so `voyage/` rerank calls return the same `results` as other providers. The reply mapping follows the model in the request, also when a `base_url` override is set. (#306)
 - Validate canonical package versions during release dry runs while preserving genuine prerelease checks.
 - Keep public coding-agent skills synchronized with native plugin resources during version updates.
 
