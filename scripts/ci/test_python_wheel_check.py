@@ -3,6 +3,7 @@
 import posixpath
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -256,6 +257,7 @@ def run_check_step(leg: dict, wheel_dir: Path) -> subprocess.CompletedProcess[st
         assert expression.startswith("${{ matrix."), expression
         assert expression.endswith(" }}"), expression
         env[name] = str(leg.get(expression[len("${{ matrix.") : -len(" }}")], ""))
+    # The Windows runner's bash has `python` and no `python3`, so the PATH holds only `python`.
     bin_dir = wheel_dir / "bin"
     bin_dir.mkdir()
     (bin_dir / "python").symlink_to(sys.executable)
@@ -264,10 +266,12 @@ def run_check_step(leg: dict, wheel_dir: Path) -> subprocess.CompletedProcess[st
     wheelhouse.mkdir()
     for wheel in wheel_dir.glob("*.whl"):
         wheel.rename(wheelhouse / wheel.name)
+    bash = shutil.which("bash")
+    assert bash
     return subprocess.run(
-        ["bash", "-c", step["run"]],
+        [bash, "-c", step["run"]],
         cwd=wheel_dir,
-        env={"PATH": f"{bin_dir}:/usr/bin:/bin", **env},
+        env={"PATH": str(bin_dir), **env},
         capture_output=True,
         text=True,
         check=False,
@@ -492,3 +496,193 @@ def test_invariant_wheel_path_holds_no_permission_beyond_the_upload() -> None:
     for text in strings(publish):
         assert "secrets" not in text, text
         assert "github.token" not in text, text
+
+
+# The tests below drive the workflow expressions the release evaluates, so they fail on any edit that changes
+# what a leg, a dry run or a pull request does, not only on the edits that remove a key.
+
+EXPRESSION_TOKEN = re.compile(r"\s*('[^']*'|==|!=|&&|\|\||[!()]|[A-Za-z_][\w.-]*)")
+
+
+def evaluate(expression: str, context: dict[str, str]) -> object:
+    """Evaluate a GitHub Actions expression; a name missing from the context fails the test."""
+    body = expression.strip()
+    if body.startswith("${{"):
+        assert body.endswith("}}"), body
+        body = body[3:-2]
+    tokens, position = [], 0
+    while body[position:].strip():
+        match = EXPRESSION_TOKEN.match(body, position)
+        assert match, body[position:]
+        tokens.append(match.group(1))
+        position = match.end()
+    value, rest = disjunction(tokens, context)
+    assert not rest, rest
+    return value
+
+
+def disjunction(tokens: list[str], context: dict[str, str]) -> tuple[object, list[str]]:
+    left, tokens = conjunction(tokens, context)
+    while tokens[:1] == ["||"]:
+        right, tokens = conjunction(tokens[1:], context)
+        left = left or right
+    return left, tokens
+
+
+def conjunction(tokens: list[str], context: dict[str, str]) -> tuple[object, list[str]]:
+    left, tokens = comparison(tokens, context)
+    while tokens[:1] == ["&&"]:
+        right, tokens = comparison(tokens[1:], context)
+        left = left and right
+    return left, tokens
+
+
+def comparison(tokens: list[str], context: dict[str, str]) -> tuple[object, list[str]]:
+    left, tokens = operand(tokens, context)
+    while tokens[:1] in (["=="], ["!="]):
+        right, rest = operand(tokens[1:], context)
+        left, tokens = (left == right) if tokens[0] == "==" else (left != right), rest
+    return left, tokens
+
+
+def operand(tokens: list[str], context: dict[str, str]) -> tuple[object, list[str]]:
+    token, rest = tokens[0], tokens[1:]
+    if token == "!":
+        value, rest = operand(rest, context)
+        return not value, rest
+    if token == "(":
+        value, rest = disjunction(rest, context)
+        assert rest[:1] == [")"], rest
+        return value, rest[1:]
+    if token.startswith("'"):
+        return token[1:-1], rest
+    if token in {"true", "false"}:
+        return token == "true", rest
+    return context[token], rest
+
+
+def resolve(value: str, context: dict[str, str]) -> object:
+    """A workflow value: text outside `${{ }}` is a literal, the whole of one is an expression."""
+    return evaluate(value, context) if value.strip().startswith("${{") else value
+
+
+def matrix_context(leg: dict) -> dict[str, str]:
+    """A leg's matrix values; a key that another leg sets and this one does not is empty, as in a real run."""
+    names = {name for other in wheel_job()["strategy"]["matrix"]["include"] for name in other}
+    return {f"matrix.{name}": str(leg.get(name, "")) for name in names}
+
+
+def test_each_leg_runs_on_the_runner_its_wheel_is_built_for() -> None:
+    """A wheel job pinned to one runner would build every leg's wheel on that runner's operating system."""
+    job = wheel_job()
+    for leg in job["strategy"]["matrix"]["include"]:
+        runner = resolve(job["runs-on"], matrix_context(leg))
+        assert runner == RELEASE_WHEEL_LEGS[leg["label"]][0], leg["label"]
+
+
+def test_every_macos_leg_builds_with_maturin_and_cargo_on_its_path() -> None:
+    """The arm64 leg takes the default before-build command, the Intel leg its own; both need cargo's environment."""
+    build = next(s for s in wheel_job()["steps"] if "build-python-wheels" in s.get("uses", ""))["with"]
+    macos = [leg for leg in wheel_job()["strategy"]["matrix"]["include"] if leg["label"].startswith("macos-")]
+    assert len(macos) == 2
+    for leg in macos:
+        command = resolve(build["cibw-before-build-macos"], matrix_context(leg))
+        parts = [part.strip() for part in str(command).split("&&")]
+        assert parts[:2] == ["pip install maturin uv", "source ~/.cargo/env"], (leg["label"], command)
+
+
+def publish_to_pypi_step() -> dict:
+    steps = publish_pypi_job()["steps"]
+    return steps[step_index(steps, "xberg-io/actions/publish-pypi")]
+
+
+def test_dry_run_never_uploads_to_pypi() -> None:
+    """Two guards, each sufficient alone: the dry run skips the publish step, and the action is told it is a dry run."""
+    step = publish_to_pypi_step()
+    for exists in ("true", "false"):
+        for force in ("true", "false"):
+            context = {
+                "needs.prepare.outputs.dry_run": "true",
+                "steps.recheck.outputs.exists": exists,
+                "needs.prepare.outputs.force_republish": force,
+            }
+            assert not evaluate(step["if"], context), (exists, force)
+            assert resolve(step["with"]["dry-run"], context) == "true", (exists, force)
+    release = {
+        "needs.prepare.outputs.dry_run": "false",
+        "steps.recheck.outputs.exists": "false",
+        "needs.prepare.outputs.force_republish": "false",
+    }
+    assert evaluate(step["if"], release)
+    assert resolve(step["with"]["dry-run"], release) == "false"
+
+
+def test_pypi_job_has_time_to_upload_every_file() -> None:
+    """PyPI takes files one at a time, so a job cancelled part way leaves a release with some wheels missing."""
+    assert publish_pypi_job()["timeout-minutes"] == 15
+
+
+def github_path_pattern(pattern: str) -> re.Pattern[str]:
+    """A workflow path filter as a regex: `**` crosses directories, `*` and `?` do not."""
+    assert not pattern.startswith("!"), pattern
+    parts = re.split(r"(\*\*|\*|\?)", pattern)
+    wildcards = {"**": ".*", "*": "[^/]*", "?": "[^/]"}
+    return re.compile("".join(wildcards.get(part, re.escape(part)) for part in parts))
+
+
+def test_pull_request_that_edits_the_wheel_path_runs_the_check() -> None:
+    """An edit to the reusable workflow, the check script or the package must start the pull-request wheel check."""
+    check_workflow = workflow("ci-python-wheels.yaml")
+    patterns = [github_path_pattern(path) for path in check_workflow[True]["pull_request"]["paths"]]
+    job = wheel_job()
+    check = job["steps"][check_step_index(job["steps"])]
+    build = next(s for s in job["steps"] if "build-python-wheels" in s.get("uses", ""))["with"]
+    read_by_the_check = {
+        ".github/workflows/ci-python-wheels.yaml",
+        check_workflow["jobs"]["wheels"]["uses"].removeprefix("./"),
+        shlex.split(check["run"])[1],
+        posixpath.join(build["package-dir"], "pyproject.toml"),
+    }
+    assert len(read_by_the_check) == 4
+    for path in sorted(read_by_the_check):
+        assert (ROOT / path).is_file(), path
+        assert any(pattern.fullmatch(path) for pattern in patterns), path
+    assert not any(pattern.fullmatch("docs/index.md") for pattern in patterns)
+
+
+def wheel_path_actions() -> Iterator[str]:
+    """Every action or workflow reference the release and the pull-request check run to build and publish wheels."""
+    yield workflow("publish.yaml")["jobs"]["build-python-wheels"]["uses"]
+    yield workflow("ci-python-wheels.yaml")["jobs"]["wheels"]["uses"]
+    for step in wheel_job()["steps"] + publish_pypi_job()["steps"]:
+        if "uses" in step:
+            yield step["uses"]
+
+
+def test_wheel_path_runs_released_action_versions() -> None:
+    """A branch ref such as `@main` lets a push to the action's repository change what the next release builds."""
+    references = list(wheel_path_actions())
+    assert len(references) >= 8
+    for reference in references:
+        assert reference.startswith("./") or re.fullmatch(r"[\w.-]+/[\w./-]+@v\d+(\.\d+)*", reference), reference
+
+
+def test_wheel_path_starts_only_from_the_release_and_pull_requests() -> None:
+    """A `pull_request_target` or `push` trigger would run the build with the base repository's secrets in reach."""
+    assert set(workflow("python-wheels.yaml")[True]) == {"workflow_call"}
+    assert set(workflow("ci-python-wheels.yaml")[True]) == {"pull_request", "workflow_dispatch"}
+
+
+def test_release_regression_job_runs_this_file() -> None:
+    """CI runs this file through the release regression task only; a deleted line would switch every test off.
+
+    The test cannot see its own removal from CI: it fails when this file runs directly, as `pytest scripts/ci` does.
+    """
+    job = workflow("ci-lint.yaml")["jobs"]["release-regressions"]
+    assert [step["run"] for step in job["steps"] if "run" in step] == ["task test:release-regressions"]
+    import yaml
+
+    task = yaml.safe_load((ROOT / "Taskfile.yml").read_text())["tasks"]["test:release-regressions"]
+    pytest_runs = [shlex.split(command) for command in task["cmds"] if "pytest" in command]
+    assert len(pytest_runs) == 1
+    assert Path(__file__).resolve().relative_to(ROOT).as_posix() in pytest_runs[0]
