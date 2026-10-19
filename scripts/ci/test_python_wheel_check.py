@@ -416,7 +416,9 @@ def test_invariant_pypi_publishes_exactly_the_files_the_check_step_read() -> Non
 
     pattern = pull["pattern"]
     prefix = pattern.removesuffix("*")
-    assert prefix and "*" not in prefix and pattern == prefix + "*"
+    assert prefix
+    assert "*" not in prefix
+    assert pattern == prefix + "*"
     for label in CONCRETE_TAGS:
         assert fnmatchcase(wheel_artifact.replace("${{ matrix.label }}", label), pattern), label
     reaching = set()
@@ -453,13 +455,17 @@ def test_invariant_release_builds_one_wheel_per_tag_and_no_other() -> None:
     assert sorted(labels) == sorted(CONCRETE_TAGS)
     optional = {"wheel_macho_arch", "before_build_macos"}
     for leg in legs:
-        assert {"label", "runner", "cibw_archs_macos", "wheel_platform"} <= set(leg) <= {
-            "label",
-            "runner",
-            "cibw_archs_macos",
-            "wheel_platform",
-            *optional,
-        }
+        assert (
+            {"label", "runner", "cibw_archs_macos", "wheel_platform"}
+            <= set(leg)
+            <= {
+                "label",
+                "runner",
+                "cibw_archs_macos",
+                "wheel_platform",
+                *optional,
+            }
+        )
         accepted = {label for label, tag in CONCRETE_TAGS.items() if re.fullmatch(leg["wheel_platform"], tag)}
         assert accepted == {leg["label"]}, leg["label"]
         assert (leg.get("wheel_macho_arch") is not None) == CONCRETE_TAGS[leg["label"]].startswith("macosx_")
@@ -476,11 +482,13 @@ def test_invariant_wheel_path_holds_no_permission_beyond_the_upload() -> None:
         for text in strings(checked):
             for word in ("secrets", "github.token", "GITHUB_TOKEN", "id-token", "twine", "gh-action-pypi-publish"):
                 assert word not in text, (word, text)
-            assert "maturin publish" not in text and "maturin upload" not in text, text
+            assert "maturin publish" not in text, text
+            assert "maturin upload" not in text, text
 
     publish = publish_pypi_job()
     assert set(publish) == {"name", "needs", "if", "runs-on", "permissions", "timeout-minutes", "environment", "steps"}
     assert publish["permissions"] == {"contents": "read", "id-token": "write"}
     assert publish["environment"]["name"] == "pypi"
     for text in strings(publish):
-        assert "secrets" not in text and "github.token" not in text, text
+        assert "secrets" not in text, text
+        assert "github.token" not in text, text
