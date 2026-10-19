@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `reasoning_effort: "none"` is now accepted by the typed `ReasoningEffort` field in every binding and reaches the server as `"none"` on OpenAI-compatible, Azure and Ollama endpoints. Anthropic and Bedrock send `thinking: {type: "disabled"}`, and Vertex AI and Gemini send a thinking budget of 0 (#301).
+- A model for a registry provider that has no route of its own, such as `snowflake/arctic` or `watsonx/ibm-slate`, now fails with an error that names the provider and asks for a `base_url`. Before, a call without `base_url` fell back to the OpenAI endpoint. The gateways that need a `base_url` (`custom`, `custom_openai`, `hosted_vllm`, `infinity`, `litellm_proxy`, `openai_like`) fail the same way when it is missing. Plain OpenAI models and providers with a route behave as before.
 
 ## [2.3.0] - 2026-10-19
 

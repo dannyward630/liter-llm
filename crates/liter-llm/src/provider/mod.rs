@@ -896,6 +896,51 @@ impl Provider for ConfigDrivenProvider {
     }
 }
 
+/// Find the registry entry named by a `provider/` prefix, by name or alias.
+fn registry_entry_for_prefix<'r>(reg: &'r ProviderRegistry, prefix: &str) -> Option<&'r ProviderEntry> {
+    reg.providers
+        .iter()
+        .find(|e| e.config.name == prefix)
+        .or_else(|| reg.providers.iter().find(|e| e.aliases.iter().any(|a| a == prefix)))
+}
+
+/// A registry entry has a route of its own when it names a `base_url` and is not a
+/// complex provider (complex providers need dedicated auth and request code, matched
+/// by prefix before the registry lookup in [`detect_provider`]).
+fn has_route(reg: &ProviderRegistry, entry: &ProviderEntry) -> bool {
+    entry.config.base_url.is_some() && !reg.complex_providers.contains(&entry.config.name)
+}
+
+/// Like [`detect_provider`], but refuses a model whose `provider/` prefix names a registry
+/// provider that has no route.
+///
+/// Such a model would otherwise fall back to [`OpenAiProvider`], sending another
+/// provider's requests to the OpenAI endpoint. Callers that have no `base_url` use this
+/// instead of [`detect_provider`] and fall back to OpenAI only on `Ok(None)`, which means
+/// the model names no registry provider at all.
+///
+/// # Errors
+///
+/// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
+pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
+    if let Some(provider) = detect_provider(model) {
+        return Ok(Some(provider));
+    }
+    if let Ok(reg) = REGISTRY.as_ref()
+        && let Some((prefix, _)) = model.split_once('/')
+        && let Some(entry) = registry_entry_for_prefix(reg, prefix)
+    {
+        return Err(LiterLlmError::BadRequest {
+            message: format!(
+                "provider `{}` has no built-in route; set base_url to its endpoint",
+                entry.config.name
+            ),
+            status: 400,
+        });
+    }
+    Ok(None)
+}
+
 /// Detect which provider to use based on model name.
 ///
 /// Strategy:
@@ -967,13 +1012,8 @@ pub(crate) fn detect_provider(model: &str) -> Option<Box<dyn Provider>> {
     };
 
     if let Some((prefix, _)) = model.split_once('/')
-        && let Some(entry) = reg
-            .providers
-            .iter()
-            .find(|e| e.config.name == prefix)
-            .or_else(|| reg.providers.iter().find(|e| e.aliases.iter().any(|a| a == prefix)))
-        && entry.config.base_url.is_some()
-        && !reg.complex_providers.contains(&entry.config.name)
+        && let Some(entry) = registry_entry_for_prefix(reg, prefix)
+        && has_route(reg, entry)
     {
         return Some(Box::new(ConfigDrivenProvider::from_entry(entry)));
     }
@@ -1279,5 +1319,129 @@ mod tests {
             .expect("valid chunk must yield Some");
         assert_eq!(chunk.id, "chatcmpl-1");
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+    }
+}
+
+#[cfg(test)]
+mod route_model_tests {
+    use super::*;
+
+    /// Registry providers without a route of their own: complex providers that no
+    /// dedicated implementation answers for, and the gateways that need a `base_url`.
+    const UNROUTED: &[&str] = &[
+        "a2a",
+        "amazon_nova",
+        "anthropic_text",
+        "auto_router",
+        "aws_polly",
+        "azure_ai",
+        "azure_text",
+        "baseten",
+        "bedrock_mantle",
+        "black_forest_labs",
+        "chatgpt",
+        "cloudflare",
+        "cursor",
+        "databricks",
+        "dataforseo",
+        "datarobot",
+        "gdc",
+        "gigachat",
+        "heroku",
+        "manus",
+        "nvidia_riva",
+        "oci",
+        "petals",
+        "ragflow",
+        "reducto",
+        "sagemaker",
+        "sagemaker_chat",
+        "sap",
+        "searxng",
+        "snowflake",
+        "soniox",
+        "triton",
+        "watsonx",
+        "watsonx_text",
+    ];
+
+    const GATEWAYS: &[&str] = &[
+        "custom",
+        "custom_openai",
+        "hosted_vllm",
+        "infinity",
+        "litellm_proxy",
+        "openai_like",
+    ];
+
+    fn refusal(model: &str) -> String {
+        match route_model(model) {
+            Err(LiterLlmError::BadRequest { message, status }) => {
+                assert_eq!(status, 400, "{model}: refusal must be a 400");
+                message
+            }
+            Err(other) => panic!("{model}: expected BadRequest, got {other:?}"),
+            Ok(found) => panic!("{model}: expected a refusal, got provider {:?}", found.map(|p| p.name().to_owned())),
+        }
+    }
+
+    #[test]
+    fn provider_without_route_is_refused_with_its_name_and_base_url() {
+        for name in UNROUTED.iter().chain(GATEWAYS) {
+            let message = refusal(&format!("{name}/some-model"));
+            assert!(message.contains(&format!("`{name}`")), "{name}: message {message:?}");
+            assert!(message.contains("base_url"), "{name}: message {message:?}");
+        }
+    }
+
+    #[test]
+    fn nested_provider_namespace_is_refused_by_its_first_segment() {
+        let message = refusal("azure_ai/agents/some-agent");
+        assert!(message.contains("`azure_ai`"), "{message:?}");
+    }
+
+    #[test]
+    fn no_registry_provider_falls_through_to_the_default() {
+        let reg = REGISTRY.as_ref().expect("registry should load");
+        let mut checked = 0;
+        for entry in &reg.providers {
+            let names = std::iter::once(entry.config.name.as_str()).chain(entry.aliases.iter().map(String::as_str));
+            for name in names {
+                let model = format!("{name}/some-model");
+                // A provider named by `provider/` either has a route or is refused.
+                // `Ok(None)` is the silent fall back to the OpenAI endpoint.
+                match route_model(&model) {
+                    Ok(None) => panic!("{model}: falls through to the default provider"),
+                    Ok(Some(_)) | Err(_) => {}
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= reg.providers.len(), "sweep covered {checked} names");
+    }
+
+    #[test]
+    fn providers_with_a_route_keep_routing() {
+        for (model, expected) in [
+            ("gpt-4o", "openai"),
+            ("claude-3-5-sonnet-20241022", "anthropic"),
+            ("anthropic/claude-3-5-sonnet-20241022", "anthropic"),
+            ("ollama/llama3", "ollama"),
+            ("ollama_chat/llama3", "ollama"),
+            ("groq/llama3-70b", "groq"),
+            ("deepseek/deepseek-chat", "deepseek"),
+            ("mistral/mistral-large-latest", "mistral"),
+        ] {
+            let provider = route_model(model)
+                .unwrap_or_else(|e| panic!("{model}: {e}"))
+                .unwrap_or_else(|| panic!("{model}: no provider"));
+            assert_eq!(provider.name(), expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn model_that_names_no_registry_provider_is_left_to_the_caller() {
+        assert!(route_model("some-random-model").expect("no refusal").is_none());
+        assert!(route_model("not-a-provider/model").expect("no refusal").is_none());
     }
 }
