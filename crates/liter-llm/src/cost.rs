@@ -872,23 +872,20 @@ pub fn list_catalog_models(provider: Option<&str>) -> Vec<CatalogModel> {
     models.into_values().collect()
 }
 
-/// Add the canonical entries of `registry` to `models`, replacing an entry of
-/// the same key. An entry is canonical when its key is the provider and the
-/// model id joined by a slash; the bare aliases of the primary providers are
-/// not.
+/// Add the models of `registry` to `models`, replacing an entry of the same
+/// key. The key comes from the provider and the model id, so a bare alias of a
+/// primary provider maps to the key of its canonical entry and adds nothing.
 fn collect_catalog_models(
     registry: &HashMap<String, ModelPricing>,
     provider: Option<&str>,
     models: &mut BTreeMap<String, CatalogModel>,
 ) {
-    for (key, pricing) in registry {
+    for pricing in registry.values() {
         if provider.is_some_and(|wanted| pricing.provider != wanted) {
             continue;
         }
         let entry = CatalogModel::from_pricing(pricing);
-        if *key == entry.key {
-            models.insert(entry.key.clone(), entry);
-        }
+        models.insert(entry.key.clone(), entry);
     }
 }
 
