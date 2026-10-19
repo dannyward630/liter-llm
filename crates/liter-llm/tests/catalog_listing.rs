@@ -5,7 +5,11 @@ use liter_llm::{CatalogModel, exact_model_info, list_catalog_models};
 #[test]
 fn the_crate_root_lists_every_provider_without_a_client() {
     let all: Vec<CatalogModel> = list_catalog_models(None);
-    assert!(all.len() > 100, "the embedded catalog holds many models, got {}", all.len());
+    assert!(
+        all.len() > 100,
+        "the embedded catalog holds many models, got {}",
+        all.len()
+    );
     assert!(all.windows(2).all(|pair| pair[0].key < pair[1].key), "sorted by key");
     for entry in all.iter().take(25) {
         let info = exact_model_info(&entry.key).unwrap_or_else(|| panic!("{} must resolve exactly", entry.key));

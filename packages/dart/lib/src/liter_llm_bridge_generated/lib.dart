@@ -10,7 +10,7 @@ part 'lib.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `try_convert_assistant_content_from_core`, `try_convert_assistant_part_from_core`, `try_convert_auth_header_format_from_core`, `try_convert_auth_type_from_core`, `try_convert_batch_status_from_core`, `try_convert_cache_backend_from_core`, `try_convert_content_part_from_core`, `try_convert_embedding_content_part_from_core`, `try_convert_embedding_format_from_core`, `try_convert_embedding_input_from_core`, `try_convert_enforcement_from_core`, `try_convert_file_purpose_from_core`, `try_convert_finish_reason_from_core`, `try_convert_image_detail_from_core`, `try_convert_message_from_core`, `try_convert_modality_from_core`, `try_convert_moderation_input_from_core`, `try_convert_ocr_document_from_core`, `try_convert_reasoning_effort_from_core`, `try_convert_refresh_outcome_from_core`, `try_convert_rerank_document_from_core`, `try_convert_response_format_from_core`, `try_convert_stop_sequence_from_core`, `try_convert_stream_format_from_core`, `try_convert_tool_choice_from_core`, `try_convert_tool_choice_mode_from_core`, `try_convert_tool_type_from_core`, `try_convert_user_content_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `IntentPrototype`, `SingleflightResult`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 /// Create a client from binding-friendly options.
 ///
@@ -215,6 +215,26 @@ Future<ModelInfo?> modelInfo({required String model}) =>
 /// Look up model metadata only when the requested catalog key exists exactly.
 Future<ModelInfo?> exactModelInfo({required String model}) =>
     RustLib.instance.api.crateExactModelInfo(model: model);
+
+/// List the models of the active model catalog without a network call.
+///
+/// Returns one `CatalogModel` per model, sorted by `CatalogModel.key`.
+/// The bare aliases that `model_info` also resolves (`"gpt-4o"` for
+/// `"openai/gpt-4o"`) are not extra entries.
+///
+/// `provider` keeps the models of that provider id only, compared exactly and
+/// case-sensitively. `null` keeps every provider. An id the catalog does not
+/// hold gives an empty list.
+///
+/// The list reads the catalog that `model_info` reads: the embedded catalog,
+/// with the models of an installed runtime overlay (see
+/// `refresh.refresh_catalog`) replacing the embedded entries of the same key.
+/// Embedded models the overlay does not name stay listed.
+///
+/// Unlike `list_models`, this sends no
+/// request and needs no API key.
+Future<List<CatalogModel>> listCatalogModels({String? provider}) =>
+    RustLib.instance.api.crateListCatalogModels(provider: provider);
 
 /// Return provenance for the active runtime or embedded model catalog.
 Future<CatalogInfo?> catalogInfo() => RustLib.instance.api.crateCatalogInfo();
@@ -677,6 +697,9 @@ Future<ModelInfo> createModelInfoFromJson({required String json}) =>
 
 Future<ModelTier> createModelTierFromJson({required String json}) =>
     RustLib.instance.api.crateCreateModelTierFromJson(json: json);
+
+Future<CatalogModel> createCatalogModelFromJson({required String json}) =>
+    RustLib.instance.api.crateCreateCatalogModelFromJson(json: json);
 
 Future<CatalogRefreshConfig> createCatalogRefreshConfigFromJson({
   required String json,
@@ -1428,6 +1451,110 @@ class CatalogInfo {
           libraryVersion == other.libraryVersion &&
           schemaVersion == other.schemaVersion &&
           origin == other.origin;
+}
+
+/// One model of the built-in catalog, as returned by [`list_catalog_models`].
+///
+/// An owned plain-data DTO. It carries what a model picker needs: the name,
+/// the provider, the mode and the limits and abilities. Prices stay behind
+/// [`model_info`], which accepts [`CatalogModel::key`].
+class CatalogModel {
+  /// Full catalog name, `"{provider}/{model}"`. [`model_info`] and
+  /// [`exact_model_info`] accept it unchanged.
+  final String key;
+
+  /// Provider id, e.g. `"openai"`.
+  final String provider;
+
+  /// Model id within the provider, e.g. `"gpt-4o"`.
+  final String model;
+
+  /// Best-effort operating mode, e.g. `"chat"`, `"embedding"`.
+  final String? mode;
+
+  /// Total context window size in tokens (input + output).
+  final PlatformInt64? maxTokens;
+
+  /// Maximum input (prompt) tokens accepted.
+  final PlatformInt64? maxInputTokens;
+
+  /// Maximum output (completion) tokens the model can generate.
+  final PlatformInt64? maxOutputTokens;
+
+  /// The model accepts image input.
+  final bool? supportsVision;
+
+  /// The model supports tool / function calling.
+  final bool? supportsFunctionCalling;
+
+  /// The model supports extended-thinking / reasoning tokens.
+  final bool? supportsReasoning;
+
+  /// The model supports JSON-mode or `response_format` structured output.
+  final bool? supportsStructuredOutput;
+
+  /// The model accepts audio input.
+  final bool? supportsAudioInput;
+
+  /// The model can generate audio output.
+  final bool? supportsAudioOutput;
+
+  /// The model supports prompt caching.
+  final bool? supportsPromptCaching;
+
+  const CatalogModel({
+    required this.key,
+    required this.provider,
+    required this.model,
+    this.mode,
+    this.maxTokens,
+    this.maxInputTokens,
+    this.maxOutputTokens,
+    this.supportsVision,
+    this.supportsFunctionCalling,
+    this.supportsReasoning,
+    this.supportsStructuredOutput,
+    this.supportsAudioInput,
+    this.supportsAudioOutput,
+    this.supportsPromptCaching,
+  });
+
+  @override
+  int get hashCode =>
+      key.hashCode ^
+      provider.hashCode ^
+      model.hashCode ^
+      mode.hashCode ^
+      maxTokens.hashCode ^
+      maxInputTokens.hashCode ^
+      maxOutputTokens.hashCode ^
+      supportsVision.hashCode ^
+      supportsFunctionCalling.hashCode ^
+      supportsReasoning.hashCode ^
+      supportsStructuredOutput.hashCode ^
+      supportsAudioInput.hashCode ^
+      supportsAudioOutput.hashCode ^
+      supportsPromptCaching.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CatalogModel &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          provider == other.provider &&
+          model == other.model &&
+          mode == other.mode &&
+          maxTokens == other.maxTokens &&
+          maxInputTokens == other.maxInputTokens &&
+          maxOutputTokens == other.maxOutputTokens &&
+          supportsVision == other.supportsVision &&
+          supportsFunctionCalling == other.supportsFunctionCalling &&
+          supportsReasoning == other.supportsReasoning &&
+          supportsStructuredOutput == other.supportsStructuredOutput &&
+          supportsAudioInput == other.supportsAudioInput &&
+          supportsAudioOutput == other.supportsAudioOutput &&
+          supportsPromptCaching == other.supportsPromptCaching;
 }
 
 /// Plain-data configuration for [`refresh_catalog`].
