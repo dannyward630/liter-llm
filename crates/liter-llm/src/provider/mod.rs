@@ -1381,7 +1381,10 @@ mod route_model_tests {
                 message
             }
             Err(other) => panic!("{model}: expected BadRequest, got {other:?}"),
-            Ok(found) => panic!("{model}: expected a refusal, got provider {:?}", found.map(|p| p.name().to_owned())),
+            Ok(found) => panic!(
+                "{model}: expected a refusal, got provider {:?}",
+                found.map(|p| p.name().to_owned())
+            ),
         }
     }
 

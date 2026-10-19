@@ -1199,27 +1199,37 @@ fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Result<Arc
         if let Some(model) = model_hint
             && model.starts_with("azure/")
         {
-            return Ok(Arc::new(provider::azure::AzureProvider::with_base_url(base_url.clone())));
+            return Ok(Arc::new(provider::azure::AzureProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("anthropic/")
         {
-            return Ok(Arc::new(provider::anthropic::AnthropicProvider::with_base_url(base_url.clone())));
+            return Ok(Arc::new(provider::anthropic::AnthropicProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && (model.starts_with("gemini/") || model.starts_with("google_ai/"))
         {
-            return Ok(Arc::new(provider::google_ai::GoogleAiProvider::with_base_url(base_url.clone())));
+            return Ok(Arc::new(provider::google_ai::GoogleAiProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("vertex_ai/")
         {
-            return Ok(Arc::new(provider::vertex::VertexAiProvider::with_base_url(base_url.clone())));
+            return Ok(Arc::new(provider::vertex::VertexAiProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("bedrock/")
         {
-            return Ok(Arc::new(build_bedrock_provider_config(config).with_base_url(base_url.clone())));
+            return Ok(Arc::new(
+                build_bedrock_provider_config(config).with_base_url(base_url.clone()),
+            ));
         }
         return Ok(Arc::new(OpenAiCompatibleProvider {
             name: "custom".into(),

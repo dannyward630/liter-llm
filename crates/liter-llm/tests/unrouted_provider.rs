@@ -27,7 +27,10 @@ struct Spy {
 impl Spy {
     fn start(reply: Option<&str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind spy");
-        let url = format!("http://127.0.0.1:{}", listener.local_addr().expect("spy address").port());
+        let url = format!(
+            "http://127.0.0.1:{}",
+            listener.local_addr().expect("spy address").port()
+        );
         let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&lines);
         let reply = reply.map(str::to_owned);
@@ -298,7 +301,11 @@ async fn provider_without_route_and_without_base_url_sends_nothing() {
         let outcomes = call_every_endpoint(&client, &format!("{provider}/some-model")).await;
         assert_refused(&outcomes, provider);
     }
-    assert_eq!(proxy.spy.seen(), Vec::<String>::new(), "no request may leave the process");
+    assert_eq!(
+        proxy.spy.seen(),
+        Vec::<String>::new(),
+        "no request may leave the process"
+    );
 }
 
 #[tokio::test]
@@ -317,7 +324,11 @@ async fn gateway_without_base_url_is_refused() {
         let outcomes = call_every_endpoint(&client, &format!("{provider}/some-model")).await;
         assert_refused(&outcomes, provider);
     }
-    assert_eq!(proxy.spy.seen(), Vec::<String>::new(), "no request may leave the process");
+    assert_eq!(
+        proxy.spy.seen(),
+        Vec::<String>::new(),
+        "no request may leave the process"
+    );
 }
 
 #[tokio::test]
@@ -326,12 +337,18 @@ async fn client_hinted_at_a_provider_without_route_is_refused_at_construction() 
     let proxy = ProxyGuard::install();
     match client(None, Some("snowflake/arctic")) {
         Err(LiterLlmError::BadRequest { message, .. }) => {
-            assert!(message.contains("`snowflake`") && message.contains("base_url"), "{message}");
+            assert!(
+                message.contains("`snowflake`") && message.contains("base_url"),
+                "{message}"
+            );
         }
         Err(other) => panic!("expected BadRequest, got {other:?}"),
         Ok(_) => panic!("expected a refusal"),
     }
-    assert!(client(None, Some("ollama/llama3")).is_ok(), "a routed hint still builds");
+    assert!(
+        client(None, Some("ollama/llama3")).is_ok(),
+        "a routed hint still builds"
+    );
     assert!(proxy.spy.seen().is_empty());
 }
 
@@ -349,7 +366,11 @@ async fn provider_without_route_works_with_a_base_url() {
             ))
             .await;
         assert!(chat.is_ok(), "{provider}: {chat:?}");
-        assert_eq!(target.seen().len(), before + 1, "{provider}: one request to the base_url");
+        assert_eq!(
+            target.seen().len(),
+            before + 1,
+            "{provider}: one request to the base_url"
+        );
     }
     assert!(
         target.seen().iter().all(|l| l.starts_with("POST ")),
