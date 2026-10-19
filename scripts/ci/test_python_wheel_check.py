@@ -274,8 +274,8 @@ def run_check_step(leg: dict, wheel_dir: Path) -> subprocess.CompletedProcess[st
     )
 
 
-def test_check_step_gives_each_leg_its_own_architecture(tmp_path: Path) -> None:
-    """Drives the step the way the release runs it: the Intel leg must reject arm64 code."""
+def test_check_step_gives_each_leg_its_own_tag_and_architecture(tmp_path: Path) -> None:
+    """Drives the step the way the release runs it: each leg rejects every other leg's tag, the Intel leg arm64 code."""
     legs = {leg["label"]: leg for leg in wheel_job()["strategy"]["matrix"]["include"]}
     assert set(legs) == set(CONCRETE_TAGS)
     for label, leg in legs.items():
@@ -286,6 +286,14 @@ def test_check_step_gives_each_leg_its_own_architecture(tmp_path: Path) -> None:
         make_wheel(good, CONCRETE_TAGS[label], {"liter_llm/_internal_bindings.abi3.so": code})
         result = run_check_step(leg, good)
         assert result.returncode == 0, (label, result.stdout + result.stderr)
+        for other_label, other_tag in CONCRETE_TAGS.items():
+            if other_label == label:
+                continue
+            foreign = tmp_path / f"tag-{other_label}-on-{label}"
+            foreign.mkdir()
+            make_wheel(foreign, other_tag, {"liter_llm/_internal_bindings.abi3.so": code})
+            refusal = 2 if other_tag.startswith("macosx_") and not expected else 1
+            assert run_check_step(leg, foreign).returncode == refusal, (label, other_label)
         if expected:
             wrong = tmp_path / f"wrong-{label}"
             wrong.mkdir()
