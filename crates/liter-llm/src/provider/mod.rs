@@ -943,9 +943,7 @@ pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
 ///
 /// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
 pub(crate) fn refuse_unrouted_hint(hint: &str) -> Result<()> {
-    if !hint.contains('/') {
-        route_model(&format!("{hint}/"))?;
-    }
+    route_model(&format!("{hint}/"))?;
     Ok(())
 }
 
