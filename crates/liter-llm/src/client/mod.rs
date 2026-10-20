@@ -1169,6 +1169,30 @@ fn model_uses_max_completion_tokens(model: &str) -> bool {
 }
 
 #[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// Map a rerank reply onto the canonical `results` shape.
+///
+/// The wire format of the reply belongs to the provider that the request model names with
+/// its `provider/` prefix. That provider is a built-in one, so a custom provider that claims
+/// the model for routing does not hide it. A model that names no provider uses the provider
+/// the request resolved to, which for a client with a `base_url` and a `model_hint` follows
+/// the hint. A `base_url` or a custom provider only says where to send the request, not how
+/// that endpoint words its reply. A provider whose reply already has the canonical shape
+/// leaves it unchanged, so a gateway that normalizes replies is not affected. Rerank replies
+/// never pass through the chat transform of the provider.
+fn transform_rerank_reply(resolved: &dyn Provider, model: &str, raw: &mut serde_json::Value) -> Result<()> {
+    // ~keep Only the `provider/` prefix names a provider here. A bare model such as `rerank-2` can
+    // ~keep match a registry model prefix of a provider that has no rerank step, and that match
+    // ~keep would hide the provider the client names through its `model_hint`.
+    let named = model
+        .split_once('/')
+        .and_then(|(prefix, _)| provider::detect_builtin_provider(&format!("{prefix}/")));
+    match named {
+        Some(named) => named.transform_rerank_response(raw),
+        None => resolved.transform_rerank_response(raw),
+    }
+}
+
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
 /// Resolve the provider to use for all requests on this client.
 ///
 /// Priority:
@@ -1609,7 +1633,7 @@ impl LlmClient for DefaultClient {
                 self.response_read_options(),
             )
             .await?;
-            prepared.provider.transform_response(&mut raw)?;
+            transform_rerank_reply(prepared.provider.as_ref(), &req.model, &mut raw)?;
             serde_json::from_value::<RerankResponse>(raw).map_err(LiterLlmError::from)
         })
     }
@@ -1998,7 +2022,7 @@ impl LlmClientRaw for DefaultClient {
             .await?;
 
             let raw_response = Some(raw.clone());
-            prepared.provider.transform_response(&mut raw)?;
+            transform_rerank_reply(prepared.provider.as_ref(), &req.model, &mut raw)?;
             let data = serde_json::from_value::<RerankResponse>(raw).map_err(LiterLlmError::from)?;
 
             Ok(RawExchange {
@@ -2837,6 +2861,35 @@ mod build_provider_tests {
             assert!(url.starts_with("http://localhost:8080/native"), "url = {url}");
             assert!(url.contains(expected_path), "url = {url}");
         }
+    }
+
+    #[test]
+    fn rerank_reply_of_a_cohere_model_keeps_its_results_array() {
+        let original = serde_json::json!({
+            "id": "r1",
+            "results": [{"index": 1, "relevance_score": 0.9}],
+            "meta": {"billed_units": {"search_units": 1}}
+        });
+        let mut body = original.clone();
+        transform_rerank_reply(&provider::cohere::CohereProvider, "cohere/rerank-v3.5", &mut body)
+            .expect("a Cohere rerank reply is not an error");
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn rerank_reply_follows_the_hint_of_a_client_with_a_base_url() {
+        let config = ClientConfigBuilder::new("test-key")
+            .base_url("http://localhost:8080/v1")
+            .build();
+        let provider = build_provider(&config, Some("voyage"));
+        let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
+        transform_rerank_reply(provider.as_ref(), "rerank-2", &mut body).unwrap();
+        assert!(body.get("results").is_some() && body.get("data").is_none());
+
+        let unhinted = build_provider(&config, None);
+        let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
+        transform_rerank_reply(unhinted.as_ref(), "rerank-2", &mut body).unwrap();
+        assert!(body.get("results").is_none() && body.get("data").is_some());
     }
 
     #[test]
