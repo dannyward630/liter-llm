@@ -469,6 +469,17 @@ pub(crate) trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Transform the raw rerank reply before deserialization into `RerankResponse`.
+    ///
+    /// The canonical shape is a top-level `results` array. Providers whose rerank
+    /// reply differs (a different key, a different `document` form) override this
+    /// to reshape it. Rerank replies do not pass through [`Provider::transform_response`]:
+    /// that step reshapes chat replies, and a chat transform applied to a rerank
+    /// reply discards the `results` array. The default is a no-op.
+    fn transform_rerank_response(&self, _body: &mut serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+
     /// Build the full URL for a specific endpoint and model.
     ///
     /// Default: `{base_url}{endpoint_path}`.  Providers like Azure and Bedrock
@@ -606,6 +617,7 @@ pub(crate) mod google_ai;
 pub(crate) mod mistral;
 pub mod outbound_policy;
 pub(crate) mod vertex;
+pub(crate) mod voyage;
 
 #[cfg(all(feature = "native-http", not(target_arch = "wasm32")))]
 pub use outbound_policy::configure_outbound_client_builder;
@@ -736,6 +748,22 @@ pub(crate) struct OpenAiCompatibleProvider {
 impl Provider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Read a rerank reply as the provider named by the client's `model_hint` words it.
+    ///
+    /// The `base_url` only says where to send the request. A client built with
+    /// `model_hint = "voyage"` still talks to a Voyage endpoint, whatever model name
+    /// (`rerank-2` or `voyage/rerank-2`) a request carries.
+    fn transform_rerank_response(&self, body: &mut serde_json::Value) -> Result<()> {
+        match self
+            .hint_provider
+            .as_deref()
+            .and_then(|hint| detect_builtin_provider(&format!("{hint}/")))
+        {
+            Some(named) => named.transform_rerank_response(body),
+            None => Ok(()),
+        }
     }
 
     fn base_url(&self) -> &str {
@@ -983,10 +1011,17 @@ fn unrouted_provider_error(reg: &ProviderRegistry, model: &str) -> Option<LiterL
 /// are excluded from config-driven routing because they require custom
 /// auth/request logic beyond simple bearer tokens.
 pub(crate) fn detect_provider(model: &str) -> Option<Box<dyn Provider>> {
-    if let Some(provider) = custom::detect_custom_provider(model) {
-        return Some(provider);
-    }
+    custom::detect_custom_provider(model).or_else(|| detect_builtin_provider(model))
+}
 
+/// Detect the built-in provider that a model name designates, skipping custom providers.
+///
+/// A custom provider decides where a request goes and how it is signed. The wire format
+/// of a reply belongs to the model name, so reply handling asks this function.
+///
+/// Every prefix test here is a case-sensitive `starts_with` (or an exact match on the
+/// registry name), so `Voyage/rerank-2` names no provider.
+pub(crate) fn detect_builtin_provider(model: &str) -> Option<Box<dyn Provider>> {
     let openai = OpenAiProvider;
     if openai.matches_model(model) {
         return Some(Box::new(openai));
@@ -1023,6 +1058,10 @@ pub(crate) fn detect_provider(model: &str) -> Option<Box<dyn Provider>> {
         || model.starts_with("mistral/")
     {
         return Some(Box::new(mistral::MistralProvider));
+    }
+
+    if model.starts_with("voyage/") {
+        return Some(Box::new(voyage::VoyageProvider));
     }
 
     if model.starts_with("github_copilot/") {
