@@ -15,6 +15,12 @@ use liter_llm::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Idle limit used by the silent stream tests.
+const SILENT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// A silent stream must end within three idle limits. A limit of eight times the timeout misses it.
+const SILENT_STREAM_BOUND: Duration = Duration::from_millis(1500);
+
 /// What the mock server does after it reads the request.
 #[derive(Clone, Copy)]
 struct Script {
@@ -238,7 +244,7 @@ async fn stream_that_goes_silent_fails_with_the_timeout_error() {
         wire: Wire::ChatSse,
     })
     .await;
-    let c = client(base, Duration::from_millis(500));
+    let c = client(base, SILENT_TIMEOUT);
     let started = Instant::now();
     let mut stream = c.chat_stream(request()).await.expect("stream opens");
     let mut last_err = None;
@@ -251,8 +257,9 @@ async fn stream_that_goes_silent_fails_with_the_timeout_error() {
     let err = last_err.expect("a silent stream must fail");
     assert!(matches!(err, LiterLlmError::Timeout), "got {err:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the stall must end at the idle limit"
+        started.elapsed() < SILENT_STREAM_BOUND,
+        "the stall must end at the idle limit, ended at {:?}",
+        started.elapsed()
     );
 }
 
@@ -392,7 +399,7 @@ async fn silent_stream_fails_with_the_timeout_error(entry: Entry, wire: Wire) {
     })
     .await;
     let started = Instant::now();
-    let mut stream = open(entry, base, Duration::from_millis(500)).await;
+    let mut stream = open(entry, base, SILENT_TIMEOUT).await;
     let mut last_err = None;
     while let Some(item) = stream.next().await {
         if let Err(e) = item {
@@ -403,8 +410,9 @@ async fn silent_stream_fails_with_the_timeout_error(entry: Entry, wire: Wire) {
     let err = last_err.expect("a silent stream must fail");
     assert!(matches!(err, LiterLlmError::Timeout), "got {err:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the stall must end at the idle limit"
+        started.elapsed() < SILENT_STREAM_BOUND,
+        "the stall must end at the idle limit, ended at {:?}",
+        started.elapsed()
     );
 }
 
@@ -448,3 +456,79 @@ idle_tests!(
     Entry::BedrockRaw,
     Wire::EventStream
 );
+
+const UNARY_BODY: &str = r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
+
+/// Serve one complete reply with a `Content-Length`, dripped in 12 pieces 200 ms apart (about 2.4 s).
+async fn drip_unary(mut sock: TcpStream) {
+    let mut buf = vec![0u8; 16384];
+    let mut seen = Vec::new();
+    while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+        match sock.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+    }
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        UNARY_BODY.len()
+    );
+    if sock.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    for piece in UNARY_BODY.as_bytes().chunks(UNARY_BODY.len().div_ceil(12)) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if sock.write_all(piece).await.is_err() || sock.flush().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn start_unary_drip() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(drip_unary(sock));
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+#[tokio::test]
+async fn chat_keeps_the_whole_request_limit() {
+    // Bytes keep arriving, so only a whole-request limit ends this call at the 1 s timeout.
+    let c = client(start_unary_drip().await, Duration::from_secs(1));
+    let started = Instant::now();
+    let result = c.chat(request()).await;
+    assert!(matches!(result, Err(LiterLlmError::Timeout)), "got {:?}", result.err());
+    assert!(
+        started.elapsed() < Duration::from_millis(1800),
+        "the call must end at the timeout, ended at {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn create_response_keeps_the_whole_request_limit() {
+    let c = client(start_unary_drip().await, Duration::from_secs(1));
+    let req = CreateResponseRequest {
+        model: "m".into(),
+        input: serde_json::json!("hi"),
+        instructions: None,
+        tools: None,
+        temperature: None,
+        max_output_tokens: None,
+        metadata: None,
+        extra_body: None,
+        stream: None,
+    };
+    let started = Instant::now();
+    let result = c.create_response(req).await;
+    assert!(matches!(result, Err(LiterLlmError::Timeout)), "got {:?}", result.err());
+    assert!(
+        started.elapsed() < Duration::from_millis(1800),
+        "the call must end at the timeout, ended at {:?}",
+        started.elapsed()
+    );
+}
