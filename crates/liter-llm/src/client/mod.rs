@@ -882,12 +882,14 @@ impl DefaultClient {
     ///
     /// Returns `LiterLlmError::Authentication` if `load_env` is enabled, no explicit
     /// API key was provided, and the provider's environment variable is unset or empty.
+    /// Returns `LiterLlmError::BadRequest` if no `base_url` is set and `model_hint` names a
+    /// registry provider that has no route of its own.
     /// Returns `LiterLlmError::InvalidHeader` if pre-validated headers somehow
     /// become invalid during client construction (extremely rare; indicates a bug).
     /// Returns `LiterLlmError::Http` if the underlying HTTP client cannot be constructed.
     pub fn new(config: ClientConfig, model_hint: Option<&str>) -> Result<Self> {
         config::validate_response_limit(config.max_response_bytes)?;
-        let provider = build_provider(&config, model_hint);
+        let provider = build_provider(&config, model_hint)?;
         provider.validate()?;
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -969,22 +971,34 @@ impl DefaultClient {
     /// If the model prefix clearly identifies a provider that differs from the
     /// construction-time default, the detected provider is returned.  Otherwise
     /// the construction-time provider is reused (zero allocation).
-    fn resolve_provider_for_model(&self, model: &str) -> Arc<dyn Provider> {
+    fn resolve_provider_for_model(&self, model: &str) -> Result<Arc<dyn Provider>> {
         // ~keep A base_url override pins the construction-time provider for mock/proxy endpoints.
         if self.config.base_url.is_some() {
-            return Arc::clone(&self.provider);
+            return Ok(Arc::clone(&self.provider));
         }
         // ~keep Keep the construction-time provider when it already matches the model.
         if self.provider.matches_model(model) {
-            return Arc::clone(&self.provider);
+            return Ok(Arc::clone(&self.provider));
         }
         if model.starts_with("bedrock/") {
-            return build_bedrock_provider(&self.config);
+            return Ok(build_bedrock_provider(&self.config));
         }
-        if let Some(detected) = provider::detect_provider(model) {
-            return Arc::from(detected);
+        if let Some(detected) = provider::route_model(model)? {
+            return Ok(Arc::from(detected));
         }
-        Arc::clone(&self.provider)
+        Ok(Arc::clone(&self.provider))
+    }
+
+    /// Refuse a model that names a registry provider with no route.
+    ///
+    /// For endpoints that always use the construction-time provider (the Responses API),
+    /// so a model for another provider is not sent to that provider's endpoint.
+    /// Does nothing when a `base_url` is set.
+    fn refuse_unrouted_model(&self, model: &str) -> Result<()> {
+        if self.config.base_url.is_none() {
+            provider::route_model(model)?;
+        }
+        Ok(())
     }
 
     /// Compute the auth header for a given provider (potentially different from
@@ -1058,7 +1072,7 @@ impl DefaultClient {
             });
         }
 
-        let prov = self.resolve_provider_for_model(model);
+        let prov = self.resolve_provider_for_model(model)?;
         let bare_model = prov.strip_model_prefix(model).to_owned();
         // ~keep Providers such as Azure and Bedrock embed model/deployment identifiers in URLs.
         let endpoint_path = endpoint_fn(prov.as_ref());
@@ -1206,52 +1220,63 @@ fn transform_rerank_reply(resolved: &dyn Provider, model: &str, raw: &mut serde_
 ///      provider named by `model_hint` (issue #249).
 /// 2. `model_hint` -> auto-detect by model name prefix.
 /// 3. Default -> OpenAI.
-fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Arc<dyn Provider> {
+fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Result<Arc<dyn Provider>> {
     if let Some(ref base_url) = config.base_url {
         if let Some(model) = model_hint
             && model.starts_with("azure/")
         {
-            return Arc::new(provider::azure::AzureProvider::with_base_url(base_url.clone()));
+            return Ok(Arc::new(provider::azure::AzureProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("anthropic/")
         {
-            return Arc::new(provider::anthropic::AnthropicProvider::with_base_url(base_url.clone()));
+            return Ok(Arc::new(provider::anthropic::AnthropicProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && (model.starts_with("gemini/") || model.starts_with("google_ai/"))
         {
-            return Arc::new(provider::google_ai::GoogleAiProvider::with_base_url(base_url.clone()));
+            return Ok(Arc::new(provider::google_ai::GoogleAiProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("vertex_ai/")
         {
-            return Arc::new(provider::vertex::VertexAiProvider::with_base_url(base_url.clone()));
+            return Ok(Arc::new(provider::vertex::VertexAiProvider::with_base_url(
+                base_url.clone(),
+            )));
         }
         if let Some(model) = model_hint
             && model.starts_with("bedrock/")
         {
-            return Arc::new(build_bedrock_provider_config(config).with_base_url(base_url.clone()));
+            return Ok(Arc::new(
+                build_bedrock_provider_config(config).with_base_url(base_url.clone()),
+            ));
         }
-        return Arc::new(OpenAiCompatibleProvider {
+        return Ok(Arc::new(OpenAiCompatibleProvider {
             name: "custom".into(),
             base_url: base_url.clone(),
             env_var: None,
             model_prefixes: vec![],
             hint_provider: model_hint.and_then(provider::hint_provider_name),
-        });
+        }));
     }
 
     if let Some(model) = model_hint {
         if model.starts_with("bedrock/") {
-            return build_bedrock_provider(config);
+            return Ok(build_bedrock_provider(config));
         }
-        if let Some(p) = provider::detect_provider(model) {
-            return Arc::from(p);
+        if let Some(p) = provider::route_model(model)? {
+            return Ok(Arc::from(p));
         }
+        provider::refuse_unrouted_hint(model)?;
     }
 
-    Arc::new(OpenAiProvider)
+    Ok(Arc::new(OpenAiProvider))
 }
 
 /// Build a [`provider::bedrock::BedrockProvider`] from `config`, threading
@@ -2554,6 +2579,7 @@ fn reject_malformed_responses_url(url: &str, provider_name: &str) -> Result<()> 
 impl ResponseClient for DefaultClient {
     fn create_response(&self, req: CreateResponseRequest) -> BoxFuture<'_, Result<ResponseObject>> {
         Box::pin(async move {
+            self.refuse_unrouted_model(&req.model)?;
             let url = self.provider.build_url(self.provider.responses_path(), "");
             reject_malformed_responses_url(&url, self.provider.name())?;
             let body_json = response_request_body(&req)?;
@@ -2582,6 +2608,7 @@ impl ResponseClient for DefaultClient {
         req: CreateResponseRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<ResponseStreamEvent>>>> {
         Box::pin(async move {
+            self.refuse_unrouted_model(&req.model)?;
             // ~keep Force streaming on the wire regardless of what the caller (or extra_body) set.
             let url = self.provider.build_stream_url(self.provider.responses_path(), "");
             reject_malformed_responses_url(&url, self.provider.name())?;
@@ -2812,7 +2839,7 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("https://resourceA.cognitiveservices.azure.com")
             .build();
-        let p = build_provider(&config, Some("azure/gpt-5-mini"));
+        let p = build_provider(&config, Some("azure/gpt-5-mini")).expect("provider should build");
         assert_eq!(p.name(), "azure");
         let url = p.build_url("/chat/completions", "gpt-5-mini");
         assert!(
@@ -2826,7 +2853,7 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:11434/v1")
             .build();
-        let p = build_provider(&config, Some("llama3.1:8b"));
+        let p = build_provider(&config, Some("llama3.1:8b")).expect("provider should build");
         assert_eq!(p.name(), "custom");
         let url = p.build_url("/chat/completions", "llama3.1:8b");
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
@@ -2837,7 +2864,7 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:11434/v1?token=secret")
             .build();
-        let provider = build_provider(&config, Some("local-model"));
+        let provider = build_provider(&config, Some("local-model")).expect("provider should build");
         let url = provider.build_url("/chat/completions", "local-model");
         assert_eq!(url, "http://localhost:11434/v1/chat/completions?token=secret");
     }
@@ -2854,7 +2881,7 @@ mod build_provider_tests {
             ("vertex_ai/gemini-2.5-flash", "vertex_ai", ":generateContent"),
             ("bedrock/anthropic.claude-v2", "bedrock", "/model/"),
         ] {
-            let provider = build_provider(&config, Some(model));
+            let provider = build_provider(&config, Some(model)).expect("provider should build");
             let bare_model = provider.strip_model_prefix(model);
             let url = provider.build_url(provider.chat_completions_path(), bare_model);
             assert_eq!(provider.name(), expected_name);
@@ -2881,12 +2908,12 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:8080/v1")
             .build();
-        let provider = build_provider(&config, Some("voyage"));
+        let provider = build_provider(&config, Some("voyage")).expect("provider should build");
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(provider.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_some() && body.get("data").is_none());
 
-        let unhinted = build_provider(&config, None);
+        let unhinted = build_provider(&config, None).expect("provider should build");
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(unhinted.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_none() && body.get("data").is_some());
@@ -2898,7 +2925,7 @@ mod build_provider_tests {
             .base_url("http://localhost:11434/v1")
             .build();
 
-        let hinted = build_provider(&config, Some("openai"));
+        let hinted = build_provider(&config, Some("openai")).expect("provider should build");
         assert_eq!(hinted.strip_model_prefix("openai/gpt-4o-mini"), "gpt-4o-mini");
         assert_eq!(hinted.strip_model_prefix("custom/my-model"), "my-model");
         assert_eq!(hinted.strip_model_prefix("anthropic/claude-x"), "anthropic/claude-x");
@@ -2906,10 +2933,10 @@ mod build_provider_tests {
         assert_eq!(hinted.strip_model_prefix("llama3.1:8b"), "llama3.1:8b");
         assert_eq!(hinted.strip_model_prefix("openai/"), "openai/");
 
-        let hinted_with_model = build_provider(&config, Some("openai/gpt-4o-mini"));
+        let hinted_with_model = build_provider(&config, Some("openai/gpt-4o-mini")).expect("provider should build");
         assert_eq!(hinted_with_model.strip_model_prefix("openai/gpt-4o"), "gpt-4o");
 
-        let unhinted = build_provider(&config, None);
+        let unhinted = build_provider(&config, None).expect("provider should build");
         assert_eq!(unhinted.strip_model_prefix("openai/gpt-4o-mini"), "openai/gpt-4o-mini");
         assert_eq!(unhinted.strip_model_prefix("custom/my-model"), "my-model");
     }
@@ -2917,7 +2944,7 @@ mod build_provider_tests {
     #[test]
     fn no_base_url_falls_through_to_detect_provider() {
         let config = ClientConfigBuilder::new("test-key").build();
-        let p = build_provider(&config, Some("azure/gpt-4o"));
+        let p = build_provider(&config, Some("azure/gpt-4o")).expect("provider should build");
         assert_eq!(p.name(), "azure");
     }
 
@@ -2926,7 +2953,7 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("https://proxy.internal/anthropic/")
             .build();
-        let p = build_provider(&config, Some("anthropic/claude-3-5-sonnet-20241022"));
+        let p = build_provider(&config, Some("anthropic/claude-3-5-sonnet-20241022")).expect("provider should build");
         assert_eq!(p.name(), "anthropic");
         assert_eq!(p.base_url(), "https://proxy.internal/anthropic");
     }
