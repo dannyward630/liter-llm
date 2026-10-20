@@ -1173,12 +1173,12 @@ fn model_uses_max_completion_tokens(model: &str) -> bool {
 ///
 /// The wire format of the reply belongs to the provider that the request model names with
 /// its `provider/` prefix. That provider is a built-in one, so a custom provider that claims
-/// the model for routing does not hide it. A model that names no provider uses the provider the request resolved to, which
-/// for a client with a `base_url` and a `model_hint` follows the hint. A `base_url` or a
-/// custom provider only says where to send the request, not how that endpoint words its
-/// reply. A provider whose reply already has the canonical shape leaves it unchanged, so
-/// a gateway that normalizes replies is not affected. Rerank replies never pass through
-/// the chat transform of the provider.
+/// the model for routing does not hide it. A model that names no provider uses the provider
+/// the request resolved to, which for a client with a `base_url` and a `model_hint` follows
+/// the hint. A `base_url` or a custom provider only says where to send the request, not how
+/// that endpoint words its reply. A provider whose reply already has the canonical shape
+/// leaves it unchanged, so a gateway that normalizes replies is not affected. Rerank replies
+/// never pass through the chat transform of the provider.
 fn transform_rerank_reply(resolved: &dyn Provider, model: &str, raw: &mut serde_json::Value) -> Result<()> {
     // ~keep Only the `provider/` prefix names a provider here. A bare model such as `rerank-2` can
     // ~keep match a registry model prefix of a provider that has no rerank step, and that match

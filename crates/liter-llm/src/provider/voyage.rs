@@ -224,4 +224,18 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_voyage_prefix_needs_the_slash() {
+        use crate::provider::detect_builtin_provider;
+
+        let named = detect_builtin_provider("voyage/rerank-2").expect("voyage/ names a provider");
+        assert_eq!(named.name(), "voyage");
+        for model in ["voyage-3", "voyage-rerank-2", "voyageai/x", "voyage"] {
+            assert!(
+                detect_builtin_provider(model).is_none(),
+                "{model} has no voyage/ prefix and must not name the Voyage provider"
+            );
+        }
+    }
 }
