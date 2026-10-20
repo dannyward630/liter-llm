@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list_catalog_models(provider)` lists the models of the built-in catalog without a network call or an API key, in
+  every binding. Each entry has the full catalog name, the provider, the model, the mode, the token limits and the
+  ability flags. The list is sorted by name in byte order and covers an installed catalog refresh. The optional
+  `provider` argument keeps the models of one catalog provider id, such as `openai`; a routing name from
+  `all_providers` that is not a catalog id gives an empty list, and an empty `provider` keeps every provider (#310).
+
 ### Fixed
 
 - Parse Voyage rerank replies, which list the scored documents under `data` instead of `results`, so `voyage/` rerank calls return the same `results` as other providers. The reply shape follows the model in the request, and a client that names Voyage as its `model_hint` reads Voyage replies for a bare model such as `rerank-2`. A custom provider that claims the `voyage/` prefix still decides where the request goes, but the reply is read as a Voyage reply. A `results: null` beside a valid `data` array parses from `data`. The `voyage/` prefix is case-sensitive, like every other provider prefix. (#306)
