@@ -2908,12 +2908,12 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:8080/v1")
             .build();
-        let provider = build_provider(&config, Some("voyage"));
+        let provider = build_provider(&config, Some("voyage")).expect("provider should build");
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(provider.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_some() && body.get("data").is_none());
 
-        let unhinted = build_provider(&config, None);
+        let unhinted = build_provider(&config, None).expect("provider should build");
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(unhinted.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_none() && body.get("data").is_some());
