@@ -303,6 +303,28 @@ pub struct AuthConfig {
     pub env_var: Option<String>,
 }
 
+/// The HTTP status an error event stands for when its payload has no usable
+/// `status_code`. The error code decides first, then the error type; an error
+/// with neither reads as 400, like a request the provider refused.
+fn status_for_error_kind(code: Option<&str>, kind: Option<&str>) -> u16 {
+    match code {
+        Some("rate_limit_exceeded" | "insufficient_quota") => return 429,
+        Some("invalid_api_key") => return 401,
+        Some("model_not_found") => return 404,
+        Some("server_error") => return 500,
+        _ => {}
+    }
+    match kind {
+        Some("rate_limit_error") => 429,
+        Some("authentication_error") => 401,
+        Some("permission_error") => 403,
+        Some("not_found_error") => 404,
+        Some("server_error" | "api_error") => 500,
+        Some("overloaded_error") => 529,
+        _ => 400,
+    }
+}
+
 /// A provider defines how to reach an LLM API endpoint.
 pub(crate) trait Provider: Send + Sync {
     /// Validate provider configuration at construction time.
@@ -523,20 +545,31 @@ pub(crate) trait Provider: Send + Sync {
         // otherwise decode into a valid-looking, content-free chunk and the
         // failure would vanish, leaving callers awaiting content that is never
         // sent.
+        //
+        // ~keep The error kind comes from `LiterLlmError::from_status`, the same
+        // classifier the HTTP path uses, so an error event is the same kind
+        // mid-stream as the same body in an HTTP reply. A payload status in
+        // 400..=599 goes to that classifier as is. A payload status outside that
+        // range keeps its raw number in a bad-request error. With no usable status,
+        // `status_for_error_kind` reads one from the error code or type.
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(event_data)
             && let Some(error) = value.get("error")
         {
-            let message = error
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("provider returned an error mid-stream")
-                .to_string();
+            let text = |key: &str| error.get(key).and_then(serde_json::Value::as_str);
+            let message = text("message").unwrap_or("provider returned an error mid-stream");
             let status = error
                 .get("status_code")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|s| u16::try_from(s).ok())
-                .unwrap_or(400);
-            return Err(LiterLlmError::BadRequest { message, status });
+                .unwrap_or_else(|| status_for_error_kind(text("code"), text("type")));
+            if !(400..=599).contains(&status) {
+                return Err(LiterLlmError::BadRequest {
+                    message: message.to_string(),
+                    status,
+                });
+            }
+            let body = serde_json::json!({ "error": { "message": message, "code": text("code") } });
+            return Err(LiterLlmError::from_status(status, &body.to_string(), None));
         }
 
         serde_json::from_str::<crate::types::ChatCompletionChunk>(event_data)
@@ -1353,6 +1386,199 @@ mod tests {
             .expect_err("an error object without a status must still be an error");
         assert_eq!(err.status_code(), 400);
         assert!(err.to_string().contains("upstream capacity exceeded"));
+    }
+
+    /// Parse a mid-stream error event and return the error it raises.
+    fn mid_stream_error(payload: &str) -> LiterLlmError {
+        OpenAiProvider
+            .parse_stream_event(payload)
+            .expect_err("a mid-stream error object must not decode as a chunk")
+    }
+
+    /// Revert line: in `parse_stream_event`, build `BadRequest` directly instead of
+    /// calling `LiterLlmError::from_status` to make this test fail.
+    #[test]
+    fn parse_stream_event_classifies_rate_limit_error_without_status() {
+        let err = mid_stream_error(
+            r#"{"error":{"message":"slow down","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#,
+        );
+        assert!(matches!(err, LiterLlmError::RateLimited { .. }), "got: {err:?}");
+        assert_eq!(err.status_code(), 429);
+        assert!(err.is_transient());
+        assert!(err.to_string().contains("slow down"));
+    }
+
+    /// Revert line: as above, build `BadRequest` directly to make this test fail.
+    #[test]
+    fn parse_stream_event_classifies_rate_limit_error_with_status() {
+        let err = mid_stream_error(
+            r#"{"error":{"message":"slow down","type":"rate_limit_error","code":"rate_limit_exceeded","status_code":429}}"#,
+        );
+        assert!(matches!(err, LiterLlmError::RateLimited { .. }), "got: {err:?}");
+        assert_eq!(err.status_code(), 429);
+    }
+
+    /// Revert line: as above, build `BadRequest` directly to make this test fail.
+    #[test]
+    fn parse_stream_event_classifies_context_length_error_like_http() {
+        let err = mid_stream_error(
+            r#"{"error":{"message":"too long","type":"invalid_request_error","code":"context_length_exceeded"}}"#,
+        );
+        assert!(
+            matches!(err, LiterLlmError::ContextWindowExceeded { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Revert line: as above, build `BadRequest` directly to make this test fail.
+    #[test]
+    fn parse_stream_event_classifies_authentication_error_from_status() {
+        let err = mid_stream_error(r#"{"error":{"message":"bad key","code":"invalid_api_key","status_code":401}}"#);
+        assert!(
+            matches!(err, LiterLlmError::Authentication { status: 401, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Revert line: change the upper bound `599` of the range check in
+    /// `parse_stream_event` to `598`, or the lower bound `400` to `401`, to make
+    /// this test fail.
+    #[test]
+    fn parse_stream_event_classifies_the_edges_of_the_error_range() {
+        let err = mid_stream_error(r#"{"error":{"message":"edge","status_code":599}}"#);
+        assert!(
+            matches!(err, LiterLlmError::ServerError { status: 599, .. }),
+            "got: {err:?}"
+        );
+        let err =
+            mid_stream_error(r#"{"error":{"message":"edge","code":"context_length_exceeded","status_code":400}}"#);
+        assert!(
+            matches!(err, LiterLlmError::ContextWindowExceeded { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Revert line: remove the range check on the payload status in
+    /// `parse_stream_event` to make this test fail.
+    #[test]
+    fn parse_stream_event_keeps_raw_payload_status_outside_error_range() {
+        for status in [0_u16, 99, 200, 399, 600] {
+            let payload = format!(r#"{{"error":{{"message":"odd","status_code":{status}}}}}"#);
+            let err = mid_stream_error(&payload);
+            assert!(
+                matches!(&err, LiterLlmError::BadRequest { status: got, .. } if *got == status),
+                "status {status}, got: {err:?}"
+            );
+            assert!(err.to_string().contains("odd"), "status {status}, got: {err}");
+        }
+    }
+
+    /// Revert line: replace `u16::try_from(s).ok()` in `parse_stream_event` with an
+    /// `as u16` cast to make this test fail (65965 wraps to 429).
+    #[test]
+    fn parse_stream_event_ignores_payload_status_above_u16() {
+        let err = mid_stream_error(r#"{"error":{"message":"huge","status_code":65965}}"#);
+        assert!(
+            matches!(err, LiterLlmError::BadRequest { status: 400, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Revert line: drop the rate-limit code arm of `status_for_error_kind` to make
+    /// this test fail.
+    #[test]
+    fn parse_stream_event_classifies_rate_limit_code_alone() {
+        let err = mid_stream_error(r#"{"error":{"message":"slow down","code":"rate_limit_exceeded"}}"#);
+        assert!(matches!(err, LiterLlmError::RateLimited { .. }), "got: {err:?}");
+        assert_eq!(err.status_code(), 429);
+    }
+
+    /// Revert line: drop the rate-limit type arm of `status_for_error_kind` to make
+    /// this test fail.
+    #[test]
+    fn parse_stream_event_classifies_rate_limit_type_alone() {
+        let err = mid_stream_error(r#"{"error":{"message":"slow down","type":"rate_limit_error"}}"#);
+        assert!(matches!(err, LiterLlmError::RateLimited { .. }), "got: {err:?}");
+        assert_eq!(err.status_code(), 429);
+    }
+
+    /// Revert line: read the error type before the error code in
+    /// `status_for_error_kind` to make this test fail. When the two disagree,
+    /// the code decides.
+    #[test]
+    fn parse_stream_event_prefers_error_code_over_type() {
+        let cases = [
+            (r#""code":"rate_limit_exceeded","type":"invalid_request_error""#, 429),
+            (r#""code":"rate_limit_exceeded","type":"authentication_error""#, 429),
+        ];
+        for (kind, status) in cases {
+            let err = mid_stream_error(&format!(r#"{{"error":{{"message":"x",{kind}}}}}"#));
+            assert!(matches!(err, LiterLlmError::RateLimited { .. }), "{kind}: got {err:?}");
+            assert_eq!(err.status_code(), status, "{kind}");
+        }
+    }
+
+    /// Revert line: drop an arm of `status_for_error_kind` to make this test fail.
+    /// Each event has no status, and must give the kind that the same body gives
+    /// as an HTTP reply at the status `status_for_error_kind` reads from it.
+    #[test]
+    fn parse_stream_event_classifies_error_code_and_type_without_status() {
+        let cases = [
+            (r#""code":"insufficient_quota""#, 429),
+            (r#""code":"invalid_api_key""#, 401),
+            (r#""code":"model_not_found""#, 404),
+            (r#""code":"server_error""#, 500),
+            (r#""type":"authentication_error""#, 401),
+            (r#""type":"permission_error""#, 403),
+            (r#""type":"not_found_error""#, 404),
+            (r#""type":"server_error""#, 500),
+            (r#""type":"api_error""#, 500),
+            (r#""type":"overloaded_error""#, 529),
+        ];
+        for (fields, status) in cases {
+            let err = mid_stream_error(&format!(r#"{{"error":{{"message":"boom",{fields}}}}}"#));
+            let http_body = format!(r#"{{"error":{{"message":"boom",{fields}}}}}"#);
+            let http = LiterLlmError::from_status(status, &http_body, None);
+            assert_eq!(
+                std::mem::discriminant(&err),
+                std::mem::discriminant(&http),
+                "{fields}: stream gave {err:?}, HTTP {status} gives {http:?}"
+            );
+            assert_eq!(err.status_code(), http.status_code(), "{fields}");
+        }
+    }
+
+    /// Revert line: drop the `insufficient_quota` code arm of `status_for_error_kind`
+    /// to make this test fail.
+    #[test]
+    fn parse_stream_event_classifies_insufficient_quota_as_quota_exceeded() {
+        let err = mid_stream_error(r#"{"error":{"message":"out of credit","code":"insufficient_quota"}}"#);
+        assert!(
+            matches!(err, LiterLlmError::ProviderQuotaExceeded { .. }),
+            "got: {err:?}"
+        );
+        assert!(!err.is_transient());
+    }
+
+    /// An error with no status, code or type reads as a plain 400.
+    #[test]
+    fn parse_stream_event_reads_unknown_error_kind_as_bad_request() {
+        let err = mid_stream_error(r#"{"error":{"message":"odd","code":"something_else","type":"other"}}"#);
+        assert!(
+            matches!(err, LiterLlmError::BadRequest { status: 400, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Revert line: remove the fallback message in `parse_stream_event` to make this
+    /// test fail.
+    #[test]
+    fn parse_stream_event_keeps_fallback_message_when_error_has_none() {
+        let err = mid_stream_error(r#"{"error":{"code":"rate_limit_exceeded"}}"#);
+        assert!(
+            err.to_string().contains("provider returned an error mid-stream"),
+            "got: {err}"
+        );
     }
 
     /// Revert line: delete `#[serde(default)]` from `ChatCompletionChunk::choices`
