@@ -98,6 +98,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A request that times out is no longer sent again. Before, one slow reply cost about `timeout_secs * (max_retries + 1)` plus back-off, and the server ran (and billed) the request each time. The caller now gets `LiterLlmError::Timeout` after about `timeout_secs`. A timeout after the connection is open is sent once. A connection that fails or closes without a reply, `429` and `5xx` replies keep their retries (#316).
 - Apply the client timeout on WASM (wasm32). Before, the WASM client set no timeout, so a call waited for the server for as long as it took. `timeout_secs` now limits each attempt of a call that returns one reply, from the request to the end of the reply body, and the caller gets `LiterLlmError::Timeout`. It limits a stream by the silence between chunks, as on native targets. A request that times out is not sent again. This covers chat, embeddings and every other JSON call, binary calls, file uploads, and server-sent event and Bedrock event streams. A client on wasm32 with no timeout set uses the 60 s default timeout, as on native targets. The `liter-llm` crate alone now builds for wasm32 with the `wasm-http` feature (#365, #366).
 
+### Security
+
+- Reject distrusted emSign certificate chains by updating TLS validation and bundled trust stores
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+
 ## [2.3.0] - 2026-10-19
 
 ### Changed
