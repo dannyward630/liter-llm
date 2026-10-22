@@ -503,6 +503,18 @@ pub(crate) trait Provider: Send + Sync {
     /// Base URL (e.g., "https://api.openai.com/v1").
     fn base_url(&self) -> &str;
 
+    /// This provider, sent to `base_url` instead of its own host.
+    ///
+    /// A `base_url` on the client changes only the host that receives the request. The
+    /// request body, the path and the reply handling stay those of this provider.
+    /// A provider whose URL is not `{base_url}{path}` (Azure, Google AI Studio, Vertex AI,
+    /// Bedrock) or whose base URL is private state overrides this method. The default
+    /// returns `None`, and [`on_base_url`] then wraps the provider so that only its host changes.
+    fn at_base_url(&self, base_url: &str) -> Option<Box<dyn Provider>> {
+        let _ = base_url;
+        None
+    }
+
     /// Build the authorization header as `Some((header-name, header-value))`.
     ///
     /// Returns `None` when the provider requires no authentication header
@@ -699,16 +711,7 @@ pub(crate) trait Provider: Send + Sync {
     /// override this to embed deployment names, model IDs, or query parameters
     /// into the URL.
     fn build_url(&self, endpoint_path: &str, _model: &str) -> String {
-        let Ok(mut base) = url::Url::parse(self.base_url()) else {
-            return format!("{}{}", self.base_url(), endpoint_path);
-        };
-        let path = format!(
-            "{}/{}",
-            base.path().trim_end_matches('/'),
-            endpoint_path.trim_start_matches('/')
-        );
-        base.set_path(&path);
-        base.into()
+        join_url(self.base_url(), endpoint_path)
     }
 
     /// Parse a single SSE event data string into a `ChatCompletionChunk`.
@@ -857,6 +860,7 @@ pub(crate) mod google_ai;
 pub(crate) mod mistral;
 pub(crate) mod ollama;
 pub mod outbound_policy;
+pub(crate) mod rebased;
 pub(crate) mod rerank_shape;
 pub(crate) mod vertex;
 pub(crate) mod voyage;
@@ -875,6 +879,20 @@ pub(crate) use outbound_policy::{authenticated_outbound_client, configure_creden
 pub(crate) struct OpenAiProvider;
 
 impl Provider for OpenAiProvider {
+    /// OpenAI's request format at another host is the generic OpenAI-compatible provider.
+    ///
+    /// The `max_tokens` rename to `max_completion_tokens` belongs to OpenAI's own service. A
+    /// local server or a gateway at `base_url` keeps the `max_tokens` the caller sent.
+    fn at_base_url(&self, base_url: &str) -> Option<Box<dyn Provider>> {
+        Some(Box::new(OpenAiCompatibleProvider {
+            name: "custom".into(),
+            base_url: base_url.to_owned(),
+            env_var: None,
+            model_prefixes: vec![],
+            hint_provider: Some("openai".into()),
+        }))
+    }
+
     fn name(&self) -> &str {
         "openai"
     }
@@ -987,43 +1005,9 @@ pub(crate) struct OpenAiCompatibleProvider {
     pub hint_provider: Option<String>,
 }
 
-impl OpenAiCompatibleProvider {
-    /// The built-in provider that the client's `model_hint` names, if any.
-    fn hinted_builtin(&self) -> Option<Box<dyn Provider>> {
-        self.hint_provider
-            .as_deref()
-            .and_then(|hint| detect_builtin_provider(&format!("{hint}/")))
-    }
-}
-
 impl Provider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Read a rerank reply as the provider named by the client's `model_hint` words it.
-    ///
-    /// The `base_url` only says where to send the request. A client built with
-    /// `model_hint = "voyage"` still talks to a Voyage endpoint, whatever model name
-    /// (`rerank-2` or `voyage/rerank-2`) a request carries.
-    fn transform_rerank_response(&self, body: &mut serde_json::Value) -> Result<()> {
-        match self.hinted_builtin() {
-            Some(named) => named.transform_rerank_response(body),
-            None => Ok(()),
-        }
-    }
-
-    /// Word a rerank request as the provider named by the client's `model_hint` words it.
-    fn transform_rerank_request(&self, body: &mut serde_json::Value) -> Result<()> {
-        match self.hinted_builtin() {
-            Some(named) => named.transform_rerank_request(body),
-            None => Ok(()),
-        }
-    }
-
-    /// The rerank path of the provider the client's `model_hint` names.
-    fn rerank_path(&self) -> &str {
-        rerank_shape::rerank_path_of(self.hint_provider.as_deref().unwrap_or(""))
     }
 
     fn base_url(&self) -> &str {
@@ -1132,6 +1116,11 @@ impl Provider for ConfigDrivenProvider {
 
     fn env_var(&self) -> Option<&str> {
         self.config.auth.as_ref().and_then(|a| a.env_var.as_deref())
+    }
+
+    /// The rerank path of the provider: `/ranking` for NVIDIA NIM, `/rerank` for the rest.
+    fn rerank_path(&self) -> &str {
+        rerank_shape::rerank_path_of(&self.config.name)
     }
 
     fn build_url(&self, endpoint_path: &str, _model: &str) -> String {
@@ -1249,7 +1238,21 @@ fn has_route(reg: &ProviderRegistry, entry: &ProviderEntry) -> bool {
 ///
 /// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
 pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
-    if let Some(provider) = detect_provider(model) {
+    route_detected(model, detect_provider(model))
+}
+
+/// Like [`route_model`], but skips custom providers: only a built-in provider is selected.
+///
+/// # Errors
+///
+/// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
+fn route_builtin_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
+    route_detected(model, detect_builtin_provider(model))
+}
+
+/// `detected`, or the refusal for a model whose prefix names a registry provider with no route.
+fn route_detected(model: &str, detected: Option<Box<dyn Provider>>) -> Result<Option<Box<dyn Provider>>> {
+    if let Some(provider) = detected {
         return Ok(Some(provider));
     }
     if let Ok(reg) = REGISTRY.as_ref()
@@ -1260,17 +1263,69 @@ pub(crate) fn route_model(model: &str) -> Result<Option<Box<dyn Provider>>> {
     Ok(None)
 }
 
-/// Refuse a bare `model_hint` that names a registry provider with no route.
+/// The provider that a client's `model_hint` selects, or `None` when the hint names none.
 ///
-/// A hint such as `snowflake` is checked like the `snowflake/` prefix of a model. It never
-/// selects a provider: a hint that has a route keeps falling back to [`OpenAiProvider`].
+/// This is the one rule that turns a hint into a route. A bare provider name (`cohere`) and
+/// the `provider/model` form (`cohere/command-r-plus`) select the same provider, and so does
+/// a model name that [`detect_provider`] knows (`command-r-plus`). A `base_url` plays no part
+/// in the choice: it changes only the host, see [`on_base_url`].
 ///
 /// # Errors
 ///
-/// Returns [`LiterLlmError::BadRequest`] naming the provider and asking for a `base_url`.
-pub(crate) fn refuse_unrouted_hint(hint: &str) -> Result<()> {
-    route_model(&format!("{hint}/"))?;
-    Ok(())
+/// Returns [`LiterLlmError::BadRequest`] when the hint names a registry provider that has no
+/// route of its own.
+pub(crate) fn route_hint(hint: &str) -> Result<Option<Box<dyn Provider>>> {
+    route_hint_with(hint, route_model)
+}
+
+/// Like [`route_hint`], but selects only a built-in provider.
+///
+/// A client with a `base_url` uses this: the `base_url` names the host, and the hint names
+/// only the wire format. A custom provider brings its own host, so it never answers a hint there.
+///
+/// # Errors
+///
+/// Returns [`LiterLlmError::BadRequest`] when the hint names a registry provider that has no
+/// route of its own. A caller with a `base_url` treats that as "no built-in provider".
+pub(crate) fn route_builtin_hint(hint: &str) -> Result<Option<Box<dyn Provider>>> {
+    route_hint_with(hint, route_builtin_model)
+}
+
+/// Selects the provider that a model name designates.
+type ModelRoute = fn(&str) -> Result<Option<Box<dyn Provider>>>;
+
+/// The hint read as a model name first, then a bare hint read as the `hint/` prefix.
+fn route_hint_with(hint: &str, route: ModelRoute) -> Result<Option<Box<dyn Provider>>> {
+    if let Some(provider) = route(hint)? {
+        return Ok(Some(provider));
+    }
+    if hint.contains('/') {
+        return Ok(None);
+    }
+    route(&format!("{hint}/"))
+}
+
+/// Send `provider` to `base_url`: the provider keeps its request body, its paths and its
+/// reply handling, and only the host changes.
+pub(crate) fn on_base_url(provider: Box<dyn Provider>, base_url: &str) -> Box<dyn Provider> {
+    match provider.at_base_url(base_url) {
+        Some(rebased) => rebased,
+        None => Box::new(rebased::BaseUrlOverride::new(provider, base_url)),
+    }
+}
+
+/// `{base_url}{endpoint_path}`, with one `/` between the path of `base_url` and `endpoint_path`.
+pub(crate) fn join_url(base_url: &str, endpoint_path: &str) -> String {
+    let Ok(mut base) = url::Url::parse(base_url) else {
+        return format!("{base_url}{endpoint_path}");
+    };
+    let path = format!(
+        "{}/{}",
+        base.path().trim_end_matches('/'),
+        endpoint_path.trim_start_matches('/')
+    );
+    base.set_path(&path);
+    base.into()
 }
 
 /// The refusal for a model whose `provider/` prefix names a registry entry with no route.
@@ -2340,11 +2395,15 @@ mod route_model_tests {
     #[test]
     fn bare_hint_is_refused_like_its_prefix() {
         for hint in ["snowflake", "watsonx", "hosted_vllm"] {
-            match refuse_unrouted_hint(hint) {
+            match route_hint(hint) {
                 Err(LiterLlmError::BadRequest { message, .. }) => {
                     assert!(message.contains(&format!("`{hint}`")), "{message}");
                 }
-                other => panic!("{hint}: expected a refusal, got {other:?}"),
+                Err(error) => panic!("{hint}: expected a bad request, got {error:?}"),
+                Ok(routed) => panic!(
+                    "{hint}: expected a refusal, got {:?}",
+                    routed.map(|provider| provider.name().to_owned())
+                ),
             }
         }
     }
@@ -2352,8 +2411,90 @@ mod route_model_tests {
     #[test]
     fn bare_hint_with_a_route_or_no_registry_entry_is_accepted() {
         for hint in ["anthropic", "groq", "ollama", "gpt-4o", "some-local-model"] {
-            assert!(refuse_unrouted_hint(hint).is_ok(), "{hint}");
+            assert!(route_hint(hint).is_ok(), "{hint}");
         }
+    }
+
+    #[test]
+    fn bare_hint_and_slash_hint_select_the_same_provider() {
+        for (bare, slash) in [
+            ("cohere", "cohere/command-r-plus"),
+            ("mistral", "mistral/mistral-large-latest"),
+            ("voyage", "voyage/rerank-2"),
+            ("anthropic", "anthropic/claude-sonnet-4"),
+            ("gemini", "gemini/gemini-2.0-flash"),
+            ("vertex_ai", "vertex_ai/gemini-2.0-flash"),
+            ("ollama", "ollama/llama3"),
+            ("groq", "groq/llama3-8b"),
+        ] {
+            let bare_name = route_hint(bare).expect("no refusal").map(|p| p.name().to_owned());
+            let slash_name = route_hint(slash).expect("no refusal").map(|p| p.name().to_owned());
+            assert!(bare_name.is_some(), "{bare} selects a provider");
+            assert_eq!(bare_name, slash_name, "{bare} and {slash}");
+        }
+    }
+
+    #[test]
+    fn openai_at_a_base_url_is_the_generic_provider() {
+        let provider = route_hint("gpt-5").expect("no refusal").expect("gpt-5 names OpenAI");
+        let rebased = on_base_url(provider, "http://localhost:8080/v1");
+        assert_eq!(rebased.name(), "custom");
+        assert_eq!(rebased.strip_model_prefix("openai/gpt-5"), "gpt-5");
+        assert_eq!(rebased.strip_model_prefix("custom/my-model"), "my-model");
+        assert_eq!(rebased.strip_model_prefix("anthropic/claude-x"), "anthropic/claude-x");
+    }
+
+    #[test]
+    fn hint_that_names_no_provider_selects_none() {
+        for hint in ["llama3.1:8b", "some-local-model", "not-a-provider/model"] {
+            assert!(route_hint(hint).expect("no refusal").is_none(), "{hint}");
+        }
+    }
+
+    #[test]
+    fn on_base_url_changes_only_the_host() {
+        let provider = route_hint("cohere").expect("no refusal").expect("cohere is built in");
+        let rebased = on_base_url(provider, "http://gateway.test/v1/");
+        assert_eq!(rebased.name(), "cohere");
+        assert_eq!(rebased.chat_completions_path(), "/chat");
+        assert_eq!(rebased.build_url("/chat", "m"), "http://gateway.test/v1/chat");
+    }
+
+    /// Revert line: drop the `next_models_page_url` forward in `BaseUrlOverride`, and a
+    /// wrapped provider that pages its model list stops after the first page.
+    #[test]
+    fn a_rebased_provider_keeps_its_model_list_paging() {
+        let paging = Box::new(super::vertex::VertexAiProvider::with_base_url("http://vertex.test"));
+        let rebased = rebased::BaseUrlOverride::new(paging, "http://gateway.test");
+        let page = serde_json::json!({"nextPageToken": "next"});
+        assert_eq!(
+            rebased
+                .next_models_page_url("http://gateway.test/models", &page)
+                .as_deref(),
+            Some("http://gateway.test/models?pageToken=next")
+        );
+    }
+
+    #[test]
+    fn provider_without_auth_sends_the_key_as_bearer_at_a_base_url() {
+        let local = route_hint("lmstudio")
+            .expect("no refusal")
+            .expect("lmstudio is built in");
+        assert!(
+            local.auth_header("k").is_none(),
+            "lmstudio sends no key at its own host"
+        );
+        let rebased = on_base_url(local, "http://gateway.test/v1");
+        let (name, value) = rebased.auth_header("k").expect("a key at a base_url is sent");
+        assert_eq!((name.as_ref(), value.as_ref()), ("Authorization", "Bearer k"));
+    }
+
+    #[test]
+    fn provider_with_auth_keeps_its_header_at_a_base_url() {
+        let provider = route_hint("cohere").expect("no refusal").expect("cohere is built in");
+        let rebased = on_base_url(provider, "http://gateway.test/v1");
+        let (name, value) = rebased.auth_header("k").expect("cohere sends a key");
+        assert_eq!((name.as_ref(), value.as_ref()), ("Authorization", "Bearer k"));
     }
 
     #[test]

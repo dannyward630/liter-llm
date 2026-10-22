@@ -60,6 +60,11 @@ impl OllamaProvider {
 }
 
 impl Provider for OllamaProvider {
+    /// The native API at `base_url`, which drops a trailing `/v1` like [`Self::with_base_url`].
+    fn at_base_url(&self, base_url: &str) -> Option<Box<dyn Provider>> {
+        Some(Box::new(Self::with_base_url(base_url.to_owned())))
+    }
+
     fn name(&self) -> &str {
         "ollama"
     }

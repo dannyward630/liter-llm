@@ -873,6 +873,9 @@ pub struct DefaultClient {
     /// Provider resolved at construction; shared via Arc so streaming closures
     /// can capture an owned reference without requiring `unsafe`.
     provider: Arc<dyn Provider>,
+    /// True when the `model_hint` selected `provider`: a model name without a `provider/`
+    /// prefix then stays on it, instead of picking a provider by name pattern.
+    hint_pins_provider: bool,
     /// Pre-computed auth header `(name, value)` — avoids `format!("Bearer {key}")`
     /// on every request.  `None` when the provider requires no authentication.
     cached_auth_header: Option<(String, String)>,
@@ -919,15 +922,22 @@ impl DefaultClient {
     /// Build a client.
     ///
     /// Constructs an HTTP client with the given configuration and provider hint.
-    /// If `model_hint` is provided, its prefix determines the default provider
-    /// (e.g. `"groq/llama3-70b"` selects Groq; `"claude-3-5-sonnet"` defaults to OpenAI).
-    /// Pass `None` to use OpenAI as the default. The hint does not constrain
-    /// per-request routing — individual requests can override the provider via
-    /// their own model prefix.
+    /// `model_hint` selects the provider by its bare name (`"groq"`), by the
+    /// `provider/model` form (`"groq/llama3-70b"`) or by a model name the client knows
+    /// (`"claude-3-5-sonnet"` selects Anthropic). A `base_url` changes only the host
+    /// that the selected provider sends its requests to. Pass `None`, or a hint that
+    /// names no provider, to use OpenAI (or a generic OpenAI-compatible provider when
+    /// `base_url` is set). A request model with a `provider/` prefix can still
+    /// override the provider for that request, unless a `base_url` is set. A request model
+    /// without a prefix stays on the provider the hint selected.
     ///
     /// When `config.load_env` is true (the default), and no API key was provided,
     /// the client reads the provider's designated environment variable
-    /// (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) at construction time.
+    /// (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) at construction time. With a
+    /// `base_url`, only a hint in the `provider/model` form (`"anthropic/claude-3-5-sonnet"`)
+    /// reads a key from the environment. A bare name (`"anthropic"`) or a model
+    /// name (`"claude-3-5-sonnet"`) reads none, so no key from the environment goes to the
+    /// `base_url` host.
     ///
     /// # Errors
     ///
@@ -942,14 +952,21 @@ impl DefaultClient {
     pub fn new(config: ClientConfig, model_hint: Option<&str>) -> Result<Self> {
         config::validate_response_limit(config.max_response_bytes)?;
         config::validate_connect_timeout(config.connect_timeout)?;
-        let provider = build_provider(&config, model_hint)?;
+        let BuiltProvider {
+            provider,
+            hint_pins_provider,
+            environment_keys,
+        } = build_provider(&config, model_hint)?;
         provider.validate()?;
+        #[cfg(target_arch = "wasm32")]
+        let _ = environment_keys;
         let prefixed_model_provider = prefixed_model_provider(&config, model_hint);
 
         #[cfg(not(target_arch = "wasm32"))]
         let mut config = config;
         #[cfg(not(target_arch = "wasm32"))]
         if config.load_env
+            && environment_keys
             && config.api_key.expose_secret().is_empty()
             && let Some(env_var_name) = provider.env_var()
         {
@@ -970,6 +987,7 @@ impl DefaultClient {
         // ~keep Explicit tokens and credential providers stay authoritative over Workload Identity defaults.
         #[cfg(all(feature = "native-http", not(target_arch = "wasm32")))]
         if config.credential_provider.is_none()
+            && environment_keys
             && config.api_key.expose_secret().is_empty()
             && provider.name() == "vertex_ai"
         {
@@ -1029,6 +1047,7 @@ impl DefaultClient {
             http,
             http_stream,
             provider,
+            hint_pins_provider,
             cached_auth_header,
             cached_extra_headers,
             prefixed_model_provider,
@@ -1064,6 +1083,11 @@ impl DefaultClient {
         // client hinted at Ollama is pinned to the native API like any other provider: a bare model
         // goes to `/api/chat` whatever the base_url is.
         if self.config.effective_base_url().is_some() {
+            return Ok(Arc::clone(&self.provider));
+        }
+        // ~keep A hint chose the provider, so a model name without a `provider/` prefix stays on it.
+        // ~keep Otherwise a `gemini-` model under a `vertex_ai` hint would reach Google AI Studio.
+        if self.hint_pins_provider && !model.contains('/') {
             return Ok(Arc::clone(&self.provider));
         }
         // ~keep Keep the construction-time provider when it already matches the model.
@@ -1452,86 +1476,97 @@ fn rerank_wire_provider(model: &str) -> Option<Box<dyn Provider>> {
 }
 
 #[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// The provider a client resolves at construction, and whether its hint chose it.
+struct BuiltProvider {
+    provider: Arc<dyn Provider>,
+    /// True when `model_hint` selected `provider`. A bare model name then stays on it.
+    hint_pins_provider: bool,
+    /// False when the client reads no key from the environment: its key variable,
+    /// Bedrock's AWS variables and Vertex AI's default Google access token.
+    environment_keys: bool,
+}
+
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
 /// Resolve the provider to use for all requests on this client.
 ///
-/// Priority:
-/// 1. Explicit `base_url` in config:
-///    - If `model_hint` identifies a provider with a non-standard URL format
-///      (Azure embeds the deployment name and `?api-version=…`), construct
-///      that provider with the override (issue #83).
-///    - Otherwise, treat the override as a generic OpenAI-compatible endpoint
-///      (LM Studio, Ollama, vLLM, gateways, etc.).  Models are sent verbatim
-///      except for a leading `custom/` and a leading `X/` where `X` is the
-///      provider named by `model_hint` (issue #249).
-/// 2. `model_hint` -> auto-detect by model name prefix.
-/// 3. Default -> OpenAI.
-fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Result<Arc<dyn Provider>> {
-    if let Some(base_url) = config.effective_base_url().map(str::to_owned) {
-        if let Some(model) = model_hint
-            && model.starts_with("azure/")
-        {
-            return Ok(Arc::new(provider::azure::AzureProvider::with_base_url(
-                base_url.clone(),
-            )));
-        }
-        if let Some(model) = model_hint
-            && provider::ollama::OllamaProvider::names_hint(model)
-        {
-            return Ok(Arc::new(provider::ollama::OllamaProvider::with_base_url(
-                base_url.clone(),
-            )));
-        }
-        if let Some(model) = model_hint
-            && model.starts_with("anthropic/")
-        {
-            return Ok(Arc::new(provider::anthropic::AnthropicProvider::with_base_url(
-                base_url.clone(),
-            )));
-        }
-        if let Some(model) = model_hint
-            && (model.starts_with("gemini/") || model.starts_with("google_ai/"))
-        {
-            return Ok(Arc::new(provider::google_ai::GoogleAiProvider::with_base_url(
-                base_url.clone(),
-            )));
-        }
-        if let Some(model) = model_hint
-            && model.starts_with("vertex_ai/")
-        {
-            return Ok(Arc::new(provider::vertex::VertexAiProvider::with_base_url(
-                base_url.clone(),
-            )));
-        }
-        if let Some(model) = model_hint
-            && model.starts_with("bedrock/")
-        {
-            return Ok(Arc::new(
-                build_bedrock_provider_config(config).with_base_url(base_url.clone()),
-            ));
-        }
-        return Ok(Arc::new(OpenAiCompatibleProvider {
+/// One rule decides the route, and `base_url` plays no part in it:
+/// 1. `model_hint` selects a built-in provider, by its bare name (`cohere`), by the
+///    `provider/model` form (`cohere/command-r-plus`) or by a model name it knows. A hint
+///    that names a registry provider with no route is refused, unless a `base_url` supplies one.
+/// 2. A `base_url` changes only the host. The selected provider keeps its request body, its
+///    paths and its reply handling. A hint that selects no provider, and no hint, give a
+///    generic OpenAI-compatible provider at the `base_url` (LM Studio, Ollama, vLLM,
+///    gateways). Models are sent verbatim except for a leading `custom/` and a leading `X/`
+///    where `X` is the provider named by `model_hint` (issue #249).
+/// 3. Without a `base_url`, a hint that selects no provider, and no hint, give OpenAI.
+///
+/// With a `base_url`, the client reads a key from the environment only when the hint
+/// names its provider in the `provider/model` form, see [`reads_environment_keys`].
+fn build_provider(config: &ClientConfig, model_hint: Option<&str>) -> Result<BuiltProvider> {
+    let hinted = match model_hint {
+        Some(hint) => match (route_hint(config, hint), config.effective_base_url()) {
+            (Ok(routed), _) => routed,
+            // ~keep A registry provider with no route of its own is reachable through a `base_url`.
+            (Err(_), Some(_)) => None,
+            (Err(error), None) => return Err(error),
+        },
+        None => None,
+    };
+    let hint_pins_provider = hinted.is_some();
+    let environment_keys = match (hinted.as_deref(), model_hint) {
+        (Some(routed), Some(hint)) => reads_environment_keys(config, routed, hint),
+        _ => true,
+    };
+    let provider: Arc<dyn Provider> = match (hinted, config.effective_base_url()) {
+        (Some(routed), Some(base_url)) => Arc::from(provider::on_base_url(routed, base_url)),
+        (Some(routed), None) => Arc::from(routed),
+        (None, Some(base_url)) => Arc::new(OpenAiCompatibleProvider {
             name: "custom".into(),
-            base_url: base_url.clone(),
+            base_url: base_url.to_owned(),
             env_var: None,
             model_prefixes: vec![],
             hint_provider: model_hint.and_then(provider::hint_provider_name),
-        }));
-    }
+        }),
+        (None, None) => Arc::new(OpenAiProvider),
+    };
+    Ok(BuiltProvider {
+        provider,
+        hint_pins_provider,
+        environment_keys,
+    })
+}
 
-    if let Some(model) = model_hint {
-        if model.starts_with("bedrock/") {
-            return Ok(build_bedrock_provider(config));
-        }
-        if provider::ollama::OllamaProvider::names_hint(model) {
-            return Ok(Arc::new(provider::ollama::OllamaProvider::default()));
-        }
-        if let Some(p) = provider::route_model(model)? {
-            return Ok(Arc::from(p));
-        }
-        provider::refuse_unrouted_hint(model)?;
-    }
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// Whether a client whose hint selected `provider` reads a key from the environment.
+///
+/// Without a `base_url`, it does. With a `base_url`, only a hint that names the provider by
+/// its `provider/` prefix (`anthropic/claude-x`, `bedrock/m`) does: the request goes to a
+/// host the caller chose, and a bare name (`anthropic`) or a model name (`claude-x`) is
+/// read as a choice of wire format only, so it sends no key from the environment there.
+fn reads_environment_keys(config: &ClientConfig, provider: &dyn Provider, hint: &str) -> bool {
+    config.effective_base_url().is_none() || provider.strip_model_prefix(hint) != hint
+}
 
-    Ok(Arc::new(OpenAiProvider))
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// The provider that a hint selects. Bedrock is built from the client config, which
+/// carries its region and AWS keys. With a `base_url`, only a built-in provider answers:
+/// a custom provider brings its own host, and the `base_url` names the host here.
+fn route_hint(config: &ClientConfig, hint: &str) -> Result<Option<Box<dyn Provider>>> {
+    if names_bedrock(hint) {
+        let bedrock = build_bedrock_provider_config(config);
+        let environment_keys = reads_environment_keys(config, &bedrock, hint);
+        return Ok(Some(Box::new(bedrock.with_environment_keys(environment_keys))));
+    }
+    if config.effective_base_url().is_some() {
+        return provider::route_builtin_hint(hint);
+    }
+    provider::route_hint(hint)
+}
+
+#[cfg(any(feature = "native-http", feature = "wasm-http"))]
+/// True for `bedrock` and `bedrock/...`.
+fn names_bedrock(hint_or_model: &str) -> bool {
+    hint_or_model == "bedrock" || hint_or_model.starts_with("bedrock/")
 }
 
 /// The provider for a model with another provider's prefix on a client whose hint names Ollama
@@ -3068,7 +3103,9 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("https://resourceA.cognitiveservices.azure.com")
             .build();
-        let p = build_provider(&config, Some("azure/gpt-5-mini")).expect("provider should build");
+        let p = build_provider(&config, Some("azure/gpt-5-mini"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(p.name(), "azure");
         let url = p.build_url("/chat/completions", "gpt-5-mini");
         assert!(
@@ -3081,12 +3118,16 @@ mod build_provider_tests {
     fn ollama_hint_without_base_url_uses_the_native_provider_at_the_default_address() {
         let config = ClientConfigBuilder::new("").build();
         for hint in ["ollama", "ollama_chat", "ollama/llama3"] {
-            let p = build_provider(&config, Some(hint)).expect("provider should build");
+            let p = build_provider(&config, Some(hint))
+                .expect("provider should build")
+                .provider;
             assert_eq!(p.name(), "ollama", "hint {hint}");
             assert_eq!(p.base_url(), "http://localhost:11434", "hint {hint}");
             assert_eq!(p.models_path(), "/api/tags", "hint {hint}");
         }
-        let openai = build_provider(&config, Some("openai")).expect("provider should build");
+        let openai = build_provider(&config, Some("openai"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(openai.name(), "openai");
     }
 
@@ -3108,7 +3149,9 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:11434/v1")
             .build();
-        let p = build_provider(&config, Some("llama3.1:8b")).expect("provider should build");
+        let p = build_provider(&config, Some("llama3.1:8b"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(p.name(), "custom");
         let url = p.build_url("/chat/completions", "llama3.1:8b");
         assert_eq!(url, "http://localhost:11434/v1/chat/completions");
@@ -3119,7 +3162,9 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:11434/v1?token=secret")
             .build();
-        let provider = build_provider(&config, Some("local-model")).expect("provider should build");
+        let provider = build_provider(&config, Some("local-model"))
+            .expect("provider should build")
+            .provider;
         let url = provider.build_url("/chat/completions", "local-model");
         assert_eq!(url, "http://localhost:11434/v1/chat/completions?token=secret");
     }
@@ -3136,7 +3181,9 @@ mod build_provider_tests {
             ("vertex_ai/gemini-2.5-flash", "vertex_ai", ":generateContent"),
             ("bedrock/anthropic.claude-v2", "bedrock", "/model/"),
         ] {
-            let provider = build_provider(&config, Some(model)).expect("provider should build");
+            let provider = build_provider(&config, Some(model))
+                .expect("provider should build")
+                .provider;
             let bare_model = provider.strip_model_prefix(model);
             let url = provider.build_url(provider.chat_completions_path(), bare_model);
             assert_eq!(provider.name(), expected_name);
@@ -3160,7 +3207,9 @@ mod build_provider_tests {
 
     #[test]
     fn rerank_reply_of_a_bedrock_model_maps_relevance_score() {
-        let provider = build_provider(&ClientConfigBuilder::new("k").build(), None).expect("provider should build");
+        let provider = build_provider(&ClientConfigBuilder::new("k").build(), None)
+            .expect("provider should build")
+            .provider;
         let mut body = serde_json::json!({"results": [{"index": 1, "relevanceScore": 0.9}]});
         transform_rerank_reply(provider.as_ref(), "bedrock/amazon.rerank-v1:0", &mut body).unwrap();
         assert_eq!(
@@ -3174,12 +3223,14 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("http://localhost:8080/v1")
             .build();
-        let provider = build_provider(&config, Some("voyage")).expect("provider should build");
+        let provider = build_provider(&config, Some("voyage"))
+            .expect("provider should build")
+            .provider;
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(provider.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_some() && body.get("data").is_none());
 
-        let unhinted = build_provider(&config, None).expect("provider should build");
+        let unhinted = build_provider(&config, None).expect("provider should build").provider;
         let mut body = serde_json::json!({"data": [{"index": 0, "relevance_score": 0.5}]});
         transform_rerank_reply(unhinted.as_ref(), "rerank-2", &mut body).unwrap();
         assert!(body.get("results").is_none() && body.get("data").is_some());
@@ -3191,7 +3242,9 @@ mod build_provider_tests {
             .base_url("http://localhost:11434/v1")
             .build();
 
-        let hinted = build_provider(&config, Some("openai")).expect("provider should build");
+        let hinted = build_provider(&config, Some("openai"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(hinted.strip_model_prefix("openai/gpt-4o-mini"), "gpt-4o-mini");
         assert_eq!(hinted.strip_model_prefix("custom/my-model"), "my-model");
         assert_eq!(hinted.strip_model_prefix("anthropic/claude-x"), "anthropic/claude-x");
@@ -3199,10 +3252,12 @@ mod build_provider_tests {
         assert_eq!(hinted.strip_model_prefix("llama3.1:8b"), "llama3.1:8b");
         assert_eq!(hinted.strip_model_prefix("openai/"), "openai/");
 
-        let hinted_with_model = build_provider(&config, Some("openai/gpt-4o-mini")).expect("provider should build");
+        let hinted_with_model = build_provider(&config, Some("openai/gpt-4o-mini"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(hinted_with_model.strip_model_prefix("openai/gpt-4o"), "gpt-4o");
 
-        let unhinted = build_provider(&config, None).expect("provider should build");
+        let unhinted = build_provider(&config, None).expect("provider should build").provider;
         assert_eq!(unhinted.strip_model_prefix("openai/gpt-4o-mini"), "openai/gpt-4o-mini");
         assert_eq!(unhinted.strip_model_prefix("custom/my-model"), "my-model");
     }
@@ -3210,7 +3265,9 @@ mod build_provider_tests {
     #[test]
     fn no_base_url_falls_through_to_detect_provider() {
         let config = ClientConfigBuilder::new("test-key").build();
-        let p = build_provider(&config, Some("azure/gpt-4o")).expect("provider should build");
+        let p = build_provider(&config, Some("azure/gpt-4o"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(p.name(), "azure");
     }
 
@@ -3219,7 +3276,9 @@ mod build_provider_tests {
         let config = ClientConfigBuilder::new("test-key")
             .base_url("https://proxy.internal/anthropic/")
             .build();
-        let p = build_provider(&config, Some("anthropic/claude-3-5-sonnet-20241022")).expect("provider should build");
+        let p = build_provider(&config, Some("anthropic/claude-3-5-sonnet-20241022"))
+            .expect("provider should build")
+            .provider;
         assert_eq!(p.name(), "anthropic");
         assert_eq!(p.base_url(), "https://proxy.internal/anthropic");
     }
@@ -3234,6 +3293,245 @@ mod build_provider_tests {
             provider::anthropic::AnthropicProvider::default().base_url(),
             "https://api.anthropic.com/v1"
         );
+    }
+
+    /// Every hint form that names a provider: the bare name and the `provider/model` form.
+    const ROUTED_HINTS: &[(&str, &str)] = &[
+        ("cohere", "cohere"),
+        ("cohere/command-r-plus", "cohere"),
+        ("mistral", "mistral"),
+        ("mistral/mistral-large-latest", "mistral"),
+        ("voyage", "voyage"),
+        ("anthropic", "anthropic"),
+        ("anthropic/claude-sonnet-4", "anthropic"),
+        ("gemini", "google_ai"),
+        ("gemini/gemini-2.0-flash", "google_ai"),
+        ("google_ai", "google_ai"),
+        ("vertex_ai", "vertex_ai"),
+        ("vertex_ai/gemini-2.0-flash", "vertex_ai"),
+        ("ollama", "ollama"),
+        ("groq", "groq"),
+        ("fireworks_ai", "fireworks_ai"),
+    ];
+
+    /// Revert line: make the `model_hint` branch in `build_provider` read only a
+    /// slash-form hint, or skip the hint when a `base_url` is set, and the bare names
+    /// below route to OpenAI or to the generic provider again.
+    #[test]
+    fn a_bare_hint_and_a_slash_hint_select_the_same_provider() {
+        let config = ClientConfigBuilder::new("test-key").build();
+        for (hint, expected) in ROUTED_HINTS {
+            let provider = build_provider(&config, Some(hint))
+                .expect("provider should build")
+                .provider;
+            assert_eq!(provider.name(), *expected, "hint {hint}");
+        }
+    }
+
+    /// Revert line: send a hint with a `base_url` to the generic OpenAI-compatible provider
+    /// (the `return Ok(Arc::new(OpenAiCompatibleProvider { .. }))` branch for every hint) and
+    /// the provider name, the path and the transformed body differ from the no-`base_url` route.
+    #[test]
+    fn base_url_changes_only_the_host_of_the_hinted_route() {
+        let body = || {
+            serde_json::json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "top_p": 0.5,
+                "max_completion_tokens": 16,
+                "stream": false,
+                "stream_options": {"include_usage": true},
+            })
+        };
+        let plain_config = ClientConfigBuilder::new("test-key").build();
+        let based_config = ClientConfigBuilder::new("test-key")
+            .base_url("http://gateway.test/v1")
+            .build();
+        for (hint, _) in ROUTED_HINTS {
+            let plain = build_provider(&plain_config, Some(hint))
+                .expect("provider should build")
+                .provider;
+            let based = build_provider(&based_config, Some(hint))
+                .expect("provider should build")
+                .provider;
+            assert_eq!(based.name(), plain.name(), "hint {hint}");
+            assert_eq!(
+                based.chat_completions_path(),
+                plain.chat_completions_path(),
+                "hint {hint}"
+            );
+            let (mut plain_body, mut based_body) = (body(), body());
+            let plain_result = plain.transform_request(&mut plain_body).map_err(|e| e.to_string());
+            let based_result = based.transform_request(&mut based_body).map_err(|e| e.to_string());
+            assert_eq!(based_result, plain_result, "hint {hint}");
+            assert_eq!(based_body, plain_body, "hint {hint}");
+            let expected = BASE_URL_CHAT_URLS
+                .iter()
+                .find(|(listed, _)| listed == hint)
+                .map(|(_, url)| *url)
+                .unwrap_or_else(|| panic!("hint {hint} has no expected chat URL"));
+            let url = based.build_url(based.chat_completions_path(), "m");
+            assert_eq!(url, expected, "hint {hint}");
+        }
+    }
+
+    /// The chat URL of each routed hint at the base_url `http://gateway.test/v1`.
+    ///
+    /// Native Ollama drops a trailing `/v1` from its address: its route is `/api/chat` at the host.
+    const BASE_URL_CHAT_URLS: &[(&str, &str)] = &[
+        ("cohere", "http://gateway.test/v1/chat"),
+        ("cohere/command-r-plus", "http://gateway.test/v1/chat"),
+        ("mistral", "http://gateway.test/v1/chat/completions"),
+        (
+            "mistral/mistral-large-latest",
+            "http://gateway.test/v1/chat/completions",
+        ),
+        ("voyage", "http://gateway.test/v1/chat/completions"),
+        ("anthropic", "http://gateway.test/v1/messages"),
+        ("anthropic/claude-sonnet-4", "http://gateway.test/v1/messages"),
+        ("gemini", "http://gateway.test/v1/models/m:generateContent"),
+        (
+            "gemini/gemini-2.0-flash",
+            "http://gateway.test/v1/models/m:generateContent",
+        ),
+        ("google_ai", "http://gateway.test/v1/models/m:generateContent"),
+        (
+            "vertex_ai",
+            "http://gateway.test/v1/publishers/google/models/m:generateContent",
+        ),
+        (
+            "vertex_ai/gemini-2.0-flash",
+            "http://gateway.test/v1/publishers/google/models/m:generateContent",
+        ),
+        ("ollama", "http://gateway.test/api/chat"),
+        ("groq", "http://gateway.test/v1/chat/completions"),
+        ("fireworks_ai", "http://gateway.test/v1/chat/completions"),
+    ];
+
+    /// Revert line: drop the `environment_keys` check from the Vertex AI default
+    /// token step in `DefaultClient::new`, and a bare `vertex_ai` hint at a base_url
+    /// gets the default Google access token for the base_url host.
+    #[cfg(all(feature = "native-http", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_bare_vertex_hint_at_a_base_url_gets_no_google_token() {
+        let config = ClientConfigBuilder::new("").base_url("http://gateway.test/v1").build();
+        let client = DefaultClient::new(config, Some("vertex_ai")).expect("client should build");
+        assert_eq!(client.provider.name(), "vertex_ai");
+        assert!(
+            client.config.credential_provider.is_none(),
+            "a bare hint at a base_url installs no default Google token source"
+        );
+
+        let config = ClientConfigBuilder::new("").base_url("http://gateway.test/v1").build();
+        let client = DefaultClient::new(config, Some("vertex_ai/gemini-2.0-flash")).expect("client should build");
+        assert!(
+            client.config.credential_provider.is_some(),
+            "a `vertex_ai/` hint at a base_url installs the default Google token source"
+        );
+    }
+
+    /// Revert line: read `config.base_url` instead of `config.effective_base_url()` in
+    /// `build_provider` and an empty `base_url` rebases the hinted provider onto an empty host.
+    #[test]
+    fn an_empty_base_url_routes_like_an_unset_one() {
+        let plain_config = ClientConfigBuilder::new("test-key").build();
+        let empty_config = ClientConfigBuilder::new("test-key").base_url("").build();
+        for (hint, _) in ROUTED_HINTS {
+            let plain = build_provider(&plain_config, Some(hint))
+                .expect("provider should build")
+                .provider;
+            let empty = build_provider(&empty_config, Some(hint))
+                .expect("provider should build")
+                .provider;
+            assert_eq!(empty.name(), plain.name(), "hint {hint}");
+            assert_eq!(empty.base_url(), plain.base_url(), "hint {hint}");
+            assert_eq!(
+                empty.chat_completions_path(),
+                plain.chat_completions_path(),
+                "hint {hint}"
+            );
+        }
+        let client = DefaultClient::new(empty_config, Some("cohere")).expect("client should build");
+        let routed = client
+            .resolve_provider_for_model("voyage/rerank-2")
+            .expect("provider resolves");
+        assert_eq!(routed.name(), "voyage", "an empty base_url pins no provider");
+    }
+
+    /// Revert line: drop the `hint_pins_provider` early return in `resolve_provider_for_model`
+    /// and a bare model name picks its provider by name pattern again (a `gemini-` model
+    /// goes to Google AI Studio under a `vertex_ai` or `groq` hint).
+    #[test]
+    fn a_bare_model_stays_on_the_hinted_provider() {
+        let config = ClientConfigBuilder::new("test-key").build();
+        let client = DefaultClient::new(config, Some("groq")).expect("client should build");
+        for model in ["llama3-8b", "gemini-2.0-flash", "claude-sonnet-4"] {
+            let provider = client.resolve_provider_for_model(model).expect("provider resolves");
+            assert_eq!(provider.name(), "groq", "model {model}");
+        }
+        let provider = client
+            .resolve_provider_for_model("anthropic/claude-sonnet-4")
+            .expect("provider resolves");
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    /// Revert line: route the hint through `provider::route_hint` when a `base_url` is set,
+    /// and the custom provider that claims `deepinfra/` takes the hint at the `base_url`.
+    #[test]
+    #[serial_test::serial(outbound_policy)]
+    fn a_custom_provider_does_not_take_a_hint_at_a_base_url() {
+        crate::provider::custom::register_custom_provider(crate::provider::custom::CustomProviderConfig {
+            name: "deepinfra-through-gateway".into(),
+            base_url: "https://gateway.example.com/v1".into(),
+            auth_header: crate::provider::custom::AuthHeaderFormat::Bearer,
+            model_prefixes: vec!["deepinfra/".into()],
+        })
+        .expect("registration should succeed");
+        let based_config = ClientConfigBuilder::new("test-key")
+            .base_url("http://localhost:8080/v1")
+            .build();
+        let based = build_provider(&based_config, Some("deepinfra")).map(|built| built.provider.name().to_owned());
+        let plain = build_provider(&ClientConfigBuilder::new("test-key").build(), Some("deepinfra"))
+            .map(|built| built.provider.name().to_owned());
+        crate::provider::custom::unregister_custom_provider("deepinfra-through-gateway")
+            .expect("unregister should succeed");
+
+        assert_eq!(based.expect("provider should build"), "deepinfra");
+        assert_eq!(plain.expect("provider should build"), "deepinfra-through-gateway");
+    }
+
+    /// Revert line: read `config.base_url` instead of `config.effective_base_url()` in `route_hint`,
+    /// and an empty `base_url` keeps the custom provider from answering the hint.
+    #[test]
+    #[serial_test::serial(outbound_policy)]
+    fn a_custom_provider_takes_a_hint_when_the_base_url_is_empty() {
+        crate::provider::custom::register_custom_provider(crate::provider::custom::CustomProviderConfig {
+            name: "deepinfra-empty-base-url".into(),
+            base_url: "https://gateway.example.com/v1".into(),
+            auth_header: crate::provider::custom::AuthHeaderFormat::Bearer,
+            model_prefixes: vec!["deepinfra/".into()],
+        })
+        .expect("registration should succeed");
+        let empty_config = ClientConfigBuilder::new("test-key").base_url("").build();
+        let empty = build_provider(&empty_config, Some("deepinfra")).map(|built| built.provider.name().to_owned());
+        crate::provider::custom::unregister_custom_provider("deepinfra-empty-base-url")
+            .expect("unregister should succeed");
+
+        assert_eq!(empty.expect("provider should build"), "deepinfra-empty-base-url");
+    }
+
+    /// Revert line: return the refusal when a `base_url` is set in `build_provider`, and a hint that
+    /// names a provider with no route of its own no longer reaches the `base_url`.
+    #[test]
+    fn a_hint_with_no_route_builds_at_a_base_url_and_is_refused_without_one() {
+        let based_config = ClientConfigBuilder::new("test-key")
+            .base_url("http://localhost:8080/v1")
+            .build();
+        let based = build_provider(&based_config, Some("snowflake")).expect("a base_url supplies the route");
+        assert_eq!(based.provider.name(), "custom");
+        assert!(!based.hint_pins_provider);
+        let plain = build_provider(&ClientConfigBuilder::new("test-key").build(), Some("snowflake"));
+        assert!(plain.is_err(), "no route and no base_url is refused");
     }
 
     #[test]
