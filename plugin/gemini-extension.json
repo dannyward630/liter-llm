@@ -12,5 +12,49 @@
         "stdio"
       ]
     }
-  }
+  },
+  "settings": [
+    {
+      "name": "OpenAI key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "OPENAI_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Anthropic key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "ANTHROPIC_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Gemini key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "GEMINI_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Cohere key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "COHERE_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Mistral key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "MISTRAL_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Azure OpenAI key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "AZURE_OPENAI_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Groq key",
+      "description": "Configure only when this provider is used by your MCP model routing.",
+      "envVar": "GROQ_API_KEY",
+      "sensitive": true
+    }
+  ]
 }

@@ -6,9 +6,14 @@ build-backend = 'hatchling.build'
 name = 'liter-llm-hermes-plugin'
 version = '2.4.0'
 description = 'Universal LLM API client for 174 providers — chat, streaming, tools, embeddings, search, OCR, plus an OpenAI-compatible proxy and an MCP server.'
+license = 'MIT'
 requires-python = '>=3.11'
 dependencies = ['mcp==1.28.1', 'PyYAML==6.0.3']
 keywords = ['llm', 'openai', 'proxy', 'embeddings', 'mcp']
+
+[project.readme]
+content-type = 'text/markdown'
+text = "# liter-llm Hermes plugin\n\nUniversal LLM API client for 174 providers — chat, streaming, tools, embeddings, search, OCR, plus an OpenAI-compatible proxy and an MCP server.\n\nInstall this package in the same Python environment as Hermes Agent:\n\n```sh\npython -m pip install liter-llm-hermes-plugin\n```\n\nEnable the plugin through Hermes Agent's plugin configuration. Available registrations depend on the plugin's authored Hermes adapter.\n"
 
 [project.entry-points]
 [project.entry-points.'hermes_agent.plugins']

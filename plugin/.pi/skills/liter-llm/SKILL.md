@@ -11,7 +11,7 @@ name: liter-llm
 <!--
 AI-RULEZ :: GENERATED FILE — DO NOT EDIT
 Content-Hash: blake3:3e0dcb446dcc37cd4709da048b254902f8d7f825b553308c5d25074419895562
-Source-Hash: blake3:fb617a3f21527d464d7ba5b42c505689153bdacddad603a7683d97b8b175f974
+Source-Hash: blake3:e9a3504d653cf1d11dce92e35c7dc252403c7cac2ca0cae3c0b8c8addd45159e
 Schema-Version: v1
 -->
 
