@@ -1,0 +1,78 @@
+{
+  "id": "parts_reply",
+  "description": "Chat completion whose reply content is a list of text parts",
+  "docs": {
+    "topic": "chat",
+    "stem": "parts-reply",
+    "title": "Chat completion whose reply content is a list of text parts"
+  },
+  "category": "chat",
+  "tags": ["chat"],
+  "call": "chat",
+  "input": {
+    "model": "gpt-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello world"
+      }
+    ]
+  },
+  "mock_response": {
+    "status": 200,
+    "body": {
+      "id": "chatcmpl-parts001",
+      "object": "chat.completion",
+      "created": 1711000120,
+      "model": "gpt-4",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "hello"
+              },
+              {
+                "type": "text",
+                "text": " world"
+              }
+            ]
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 8,
+        "completion_tokens": 2,
+        "total_tokens": 10
+      }
+    }
+  },
+  "assertions": [
+    {
+      "type": "not_error"
+    },
+    {
+      "type": "count_equals",
+      "field": "choices[0].message.content.parts",
+      "value": 2
+    },
+    {
+      "type": "equals",
+      "field": "choices[0].message.content.parts[0].text",
+      "value": "hello"
+    },
+    {
+      "type": "equals",
+      "field": "choices[0].message.content.parts[1].text",
+      "value": " world"
+    }
+  ],
+  "skip": {
+    "languages": ["go", "c", "java", "swift", "kotlin_android"],
+    "reason": "Go, C, Java, Swift and Kotlin generate a test that reads the parts at a path or accessor the binding does not have, see xberg-io/alef#688 for every binding skipped here. Go: Content.Parts is undefined on AssistantContent. C: the parts collection JSON is NULL. Java: AssistantContent has no parts() method. Swift: content() returns a RustString with no parts(). Kotlin: the generated test cannot resolve AssistantContent.Parts or AssistantPart.Text."
+  }
+}

@@ -4,20 +4,21 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'lib.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `try_convert_assistant_content_from_core`, `try_convert_assistant_part_from_core`, `try_convert_auth_header_format_from_core`, `try_convert_auth_type_from_core`, `try_convert_batch_status_from_core`, `try_convert_cache_backend_from_core`, `try_convert_content_part_from_core`, `try_convert_embedding_content_part_from_core`, `try_convert_embedding_format_from_core`, `try_convert_embedding_input_from_core`, `try_convert_enforcement_from_core`, `try_convert_file_purpose_from_core`, `try_convert_finish_reason_from_core`, `try_convert_image_detail_from_core`, `try_convert_message_from_core`, `try_convert_modality_from_core`, `try_convert_moderation_input_from_core`, `try_convert_ocr_document_from_core`, `try_convert_reasoning_effort_from_core`, `try_convert_refresh_outcome_from_core`, `try_convert_rerank_document_from_core`, `try_convert_response_format_from_core`, `try_convert_stop_sequence_from_core`, `try_convert_stream_format_from_core`, `try_convert_tool_choice_from_core`, `try_convert_tool_choice_mode_from_core`, `try_convert_tool_type_from_core`, `try_convert_user_content_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `IntentPrototype`, `SingleflightResult`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `try_from`, `try_from`
 
 /// Create a client from binding-friendly options.
 ///
 /// **Errors:**
 ///
 /// Returns `LiterLlmError.BadRequest` for a zero or platform-overflowing
-/// `max_response_bytes`, plus the errors documented by `create_client`.
+/// `max_response_bytes`, a zero `connect_timeout_secs`, plus the errors documented by `create_client`.
 Future<DefaultClient> createClientWithOptions({
   required ClientOptions options,
 }) => RustLib.instance.api.crateCreateClientWithOptions(options: options);
@@ -215,6 +216,29 @@ Future<ModelInfo?> modelInfo({required String model}) =>
 /// Look up model metadata only when the requested catalog key exists exactly.
 Future<ModelInfo?> exactModelInfo({required String model}) =>
     RustLib.instance.api.crateExactModelInfo(model: model);
+
+/// List the models of the active model catalog without a network call.
+///
+/// Returns one entry per model of the catalog, sorted by key in byte order:
+/// upper case sorts before lower case. A bare alias that the model lookup also
+/// accepts, such as "gpt-4o" for "openai/gpt-4o", is not an extra entry.
+///
+/// The provider argument takes a catalog provider id, such as "openai" or
+/// "anthropic": the part of an entry key before the first slash. It is not a
+/// routing provider name from all_providers; only some routing names are also
+/// catalog ids. The listing keeps the models of that id only, compared exactly
+/// and case-sensitively. An id the catalog does not hold gives an empty list.
+/// When the provider is absent or empty, the listing keeps every provider.
+///
+/// The list reads the catalog that the model lookup reads: the embedded
+/// catalog, with the models of an installed catalog refresh replacing the
+/// embedded entries of the same key. Embedded models that the refresh does not
+/// name stay listed.
+///
+/// The listing sends no request and needs no API key, unlike the model list
+/// call of a client.
+Future<List<CatalogModel>> listCatalogModels({String? provider}) =>
+    RustLib.instance.api.crateListCatalogModels(provider: provider);
 
 /// Return provenance for the active runtime or embedded model catalog.
 Future<CatalogInfo?> catalogInfo() => RustLib.instance.api.crateCatalogInfo();
@@ -678,6 +702,9 @@ Future<ModelInfo> createModelInfoFromJson({required String json}) =>
 Future<ModelTier> createModelTierFromJson({required String json}) =>
     RustLib.instance.api.crateCreateModelTierFromJson(json: json);
 
+Future<CatalogModel> createCatalogModelFromJson({required String json}) =>
+    RustLib.instance.api.crateCreateCatalogModelFromJson(json: json);
+
 Future<CatalogRefreshConfig> createCatalogRefreshConfigFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateCatalogRefreshConfigFromJson(json: json);
@@ -838,6 +865,38 @@ abstract class DefaultClient implements RustOpaqueInterface {
     required String batchId,
     required WaitForBatchConfig config,
   });
+}
+
+@freezed
+sealed class AlefBridgeErrorWire with _$AlefBridgeErrorWire {
+  const AlefBridgeErrorWire._();
+
+  const factory AlefBridgeErrorWire.literLlmError({
+    required LiterLlmError error,
+  }) = AlefBridgeErrorWire_LiterLlmError;
+  const factory AlefBridgeErrorWire.catalogRefreshError({
+    required CatalogRefreshError error,
+  }) = AlefBridgeErrorWire_CatalogRefreshError;
+  const factory AlefBridgeErrorWire.invalidInput({required String message}) =
+      AlefBridgeErrorWire_InvalidInput;
+  const factory AlefBridgeErrorWire.nativeFailure({required String message}) =
+      AlefBridgeErrorWire_NativeFailure;
+}
+
+@freezed
+sealed class AlefStreamDefaultClientChatStreamWire
+    with _$AlefStreamDefaultClientChatStreamWire {
+  const AlefStreamDefaultClientChatStreamWire._();
+
+  const factory AlefStreamDefaultClientChatStreamWire.item({
+    required ChatCompletionChunk value,
+  }) = AlefStreamDefaultClientChatStreamWire_Item;
+  const factory AlefStreamDefaultClientChatStreamWire.error({
+    required LiterLlmError error,
+  }) = AlefStreamDefaultClientChatStreamWire_Error;
+  const factory AlefStreamDefaultClientChatStreamWire.nativeFailure({
+    required String message,
+  }) = AlefStreamDefaultClientChatStreamWire_NativeFailure;
 }
 
 @freezed
@@ -1430,6 +1489,110 @@ class CatalogInfo {
           origin == other.origin;
 }
 
+/// One model of the built-in catalog, as returned by the catalog listing.
+///
+/// An owned plain-data DTO. It carries what a model picker needs: the name,
+/// the provider, the mode and the limits and abilities. The prices stay in the
+/// model lookup, which accepts the key of this entry unchanged.
+class CatalogModel {
+  /// Full catalog name, "provider/model". The model lookup and the exact
+  /// model lookup accept it unchanged.
+  final String key;
+
+  /// Catalog provider id, such as "openai".
+  final String provider;
+
+  /// Model id within the provider, e.g. `"gpt-4o"`.
+  final String model;
+
+  /// Best-effort operating mode, e.g. `"chat"`, `"embedding"`.
+  final String? mode;
+
+  /// Total context window size in tokens (input + output).
+  final PlatformInt64? maxTokens;
+
+  /// Maximum input (prompt) tokens accepted.
+  final PlatformInt64? maxInputTokens;
+
+  /// Maximum output (completion) tokens the model can generate.
+  final PlatformInt64? maxOutputTokens;
+
+  /// The model accepts image input.
+  final bool? supportsVision;
+
+  /// The model supports tool / function calling.
+  final bool? supportsFunctionCalling;
+
+  /// The model supports extended-thinking / reasoning tokens.
+  final bool? supportsReasoning;
+
+  /// The model supports JSON-mode or `response_format` structured output.
+  final bool? supportsStructuredOutput;
+
+  /// The model accepts audio input.
+  final bool? supportsAudioInput;
+
+  /// The model can generate audio output.
+  final bool? supportsAudioOutput;
+
+  /// The model supports prompt caching.
+  final bool? supportsPromptCaching;
+
+  const CatalogModel({
+    required this.key,
+    required this.provider,
+    required this.model,
+    this.mode,
+    this.maxTokens,
+    this.maxInputTokens,
+    this.maxOutputTokens,
+    this.supportsVision,
+    this.supportsFunctionCalling,
+    this.supportsReasoning,
+    this.supportsStructuredOutput,
+    this.supportsAudioInput,
+    this.supportsAudioOutput,
+    this.supportsPromptCaching,
+  });
+
+  @override
+  int get hashCode =>
+      key.hashCode ^
+      provider.hashCode ^
+      model.hashCode ^
+      mode.hashCode ^
+      maxTokens.hashCode ^
+      maxInputTokens.hashCode ^
+      maxOutputTokens.hashCode ^
+      supportsVision.hashCode ^
+      supportsFunctionCalling.hashCode ^
+      supportsReasoning.hashCode ^
+      supportsStructuredOutput.hashCode ^
+      supportsAudioInput.hashCode ^
+      supportsAudioOutput.hashCode ^
+      supportsPromptCaching.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CatalogModel &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          provider == other.provider &&
+          model == other.model &&
+          mode == other.mode &&
+          maxTokens == other.maxTokens &&
+          maxInputTokens == other.maxInputTokens &&
+          maxOutputTokens == other.maxOutputTokens &&
+          supportsVision == other.supportsVision &&
+          supportsFunctionCalling == other.supportsFunctionCalling &&
+          supportsReasoning == other.supportsReasoning &&
+          supportsStructuredOutput == other.supportsStructuredOutput &&
+          supportsAudioInput == other.supportsAudioInput &&
+          supportsAudioOutput == other.supportsAudioOutput &&
+          supportsPromptCaching == other.supportsPromptCaching;
+}
+
 /// Plain-data configuration for [`refresh_catalog`].
 ///
 /// Deliberately FFI/binding-friendly: no `Duration` or `PathBuf`, just
@@ -1970,6 +2133,10 @@ class ClientOptions {
   /// Optional request timeout in seconds.
   final PlatformInt64? timeoutSecs;
 
+  /// Optional connect timeout in seconds. A connect timeout is retried up to `max_retries` times.
+  /// Zero is an error on every target. `wasm32` ignores any other value.
+  final PlatformInt64? connectTimeoutSecs;
+
   /// Optional retry count for retryable provider failures.
   final PlatformInt64? maxRetries;
 
@@ -1983,6 +2150,7 @@ class ClientOptions {
     required this.apiKey,
     this.baseUrl,
     this.timeoutSecs,
+    this.connectTimeoutSecs,
     this.maxRetries,
     this.maxResponseBytes,
     this.modelHint,
@@ -1993,6 +2161,7 @@ class ClientOptions {
       apiKey.hashCode ^
       baseUrl.hashCode ^
       timeoutSecs.hashCode ^
+      connectTimeoutSecs.hashCode ^
       maxRetries.hashCode ^
       maxResponseBytes.hashCode ^
       modelHint.hashCode;
@@ -2005,6 +2174,7 @@ class ClientOptions {
           apiKey == other.apiKey &&
           baseUrl == other.baseUrl &&
           timeoutSecs == other.timeoutSecs &&
+          connectTimeoutSecs == other.connectTimeoutSecs &&
           maxRetries == other.maxRetries &&
           maxResponseBytes == other.maxResponseBytes &&
           modelHint == other.modelHint;
@@ -2146,6 +2316,10 @@ class CreateImageRequest {
   /// User identifier for request tracking.
   final String? user;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const CreateImageRequest({
     required this.prompt,
     this.model,
@@ -2155,6 +2329,7 @@ class CreateImageRequest {
     this.style,
     this.responseFormat,
     this.user,
+    this.extraBody,
   });
 
   @override
@@ -2166,7 +2341,8 @@ class CreateImageRequest {
       quality.hashCode ^
       style.hashCode ^
       responseFormat.hashCode ^
-      user.hashCode;
+      user.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2180,7 +2356,8 @@ class CreateImageRequest {
           quality == other.quality &&
           style == other.style &&
           responseFormat == other.responseFormat &&
-          user == other.user;
+          user == other.user &&
+          extraBody == other.extraBody;
 }
 
 /// Request to create a response via the OpenAI Responses API (`POST /responses`).
@@ -2304,12 +2481,17 @@ class CreateSpeechRequest {
   /// Playback speed in `[0.25, 4.0]`. Defaults to 1.0.
   final double? speed;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const CreateSpeechRequest({
     required this.model,
     required this.input,
     required this.voice,
     this.responseFormat,
     this.speed,
+    this.extraBody,
   });
 
   @override
@@ -2318,7 +2500,8 @@ class CreateSpeechRequest {
       input.hashCode ^
       voice.hashCode ^
       responseFormat.hashCode ^
-      speed.hashCode;
+      speed.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2329,7 +2512,8 @@ class CreateSpeechRequest {
           input == other.input &&
           voice == other.voice &&
           responseFormat == other.responseFormat &&
-          speed == other.speed;
+          speed == other.speed &&
+          extraBody == other.extraBody;
 }
 
 /// Request to transcribe audio into text.
@@ -2352,6 +2536,10 @@ class CreateTranscriptionRequest {
   /// Sampling temperature in `[0.0, 1.0]`. Higher increases variability. Defaults to 0.
   final double? temperature;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const CreateTranscriptionRequest({
     required this.model,
     required this.file,
@@ -2359,6 +2547,7 @@ class CreateTranscriptionRequest {
     this.prompt,
     this.responseFormat,
     this.temperature,
+    this.extraBody,
   });
 
   @override
@@ -2368,7 +2557,8 @@ class CreateTranscriptionRequest {
       language.hashCode ^
       prompt.hashCode ^
       responseFormat.hashCode ^
-      temperature.hashCode;
+      temperature.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2380,7 +2570,8 @@ class CreateTranscriptionRequest {
           language == other.language &&
           prompt == other.prompt &&
           responseFormat == other.responseFormat &&
-          temperature == other.temperature;
+          temperature == other.temperature &&
+          extraBody == other.extraBody;
 }
 
 /// Configuration for registering a custom LLM provider at runtime.
@@ -2619,12 +2810,17 @@ class EmbeddingRequest {
   /// User identifier for request tracking.
   final String? user;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const EmbeddingRequest({
     required this.model,
     required this.input,
     this.encodingFormat,
     this.dimensions,
     this.user,
+    this.extraBody,
   });
 
   @override
@@ -2633,7 +2829,8 @@ class EmbeddingRequest {
       input.hashCode ^
       encodingFormat.hashCode ^
       dimensions.hashCode ^
-      user.hashCode;
+      user.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2644,7 +2841,8 @@ class EmbeddingRequest {
           input == other.input &&
           encodingFormat == other.encodingFormat &&
           dimensions == other.dimensions &&
-          user == other.user;
+          user == other.user &&
+          extraBody == other.extraBody;
 }
 
 /// Embedding response.
@@ -3085,7 +3283,7 @@ sealed class LiterLlmError with _$LiterLlmError {
   }) = LiterLlmError_Authentication;
   const factory LiterLlmError.rateLimited({
     required String message,
-    required PlatformInt64 retryAfter,
+    PlatformInt64? retryAfter,
   }) = LiterLlmError_RateLimited;
 
   /// `status` preserves the exact HTTP status code received (400, 405, 413, 422, …).
@@ -3111,7 +3309,7 @@ sealed class LiterLlmError with _$LiterLlmError {
   const factory LiterLlmError.serviceUnavailable({
     required String message,
     required PlatformInt64 status,
-    required PlatformInt64 retryAfter,
+    PlatformInt64? retryAfter,
   }) = LiterLlmError_ServiceUnavailable;
   const factory LiterLlmError.timeout() = LiterLlmError_Timeout;
   const factory LiterLlmError.network({required String message}) =
@@ -3137,7 +3335,7 @@ sealed class LiterLlmError with _$LiterLlmError {
       LiterLlmError_Serialization;
   const factory LiterLlmError.budgetExceeded({
     required String message,
-    required String model,
+    String? model,
   }) = LiterLlmError_BudgetExceeded;
   const factory LiterLlmError.hookRejected({required String message}) =
       LiterLlmError_HookRejected;
@@ -3317,6 +3515,10 @@ class LlmConfig {
   /// Request timeout, in seconds.
   final PlatformInt64? timeoutSecs;
 
+  /// Connect timeout, in seconds. A connect timeout is retried up to `max_retries` times.
+  /// Zero is an error on every target. `wasm32` ignores any other value.
+  final PlatformInt64? connectTimeoutSecs;
+
   /// Maximum number of retries on 429 / 5xx responses.
   final PlatformInt64? maxRetries;
 
@@ -3368,6 +3570,7 @@ class LlmConfig {
     this.apiKey,
     this.baseUrl,
     this.timeoutSecs,
+    this.connectTimeoutSecs,
     this.maxRetries,
     this.temperature,
     this.maxTokens,
@@ -3391,6 +3594,7 @@ class LlmConfig {
       apiKey.hashCode ^
       baseUrl.hashCode ^
       timeoutSecs.hashCode ^
+      connectTimeoutSecs.hashCode ^
       maxRetries.hashCode ^
       temperature.hashCode ^
       maxTokens.hashCode ^
@@ -3416,6 +3620,7 @@ class LlmConfig {
           apiKey == other.apiKey &&
           baseUrl == other.baseUrl &&
           timeoutSecs == other.timeoutSecs &&
+          connectTimeoutSecs == other.connectTimeoutSecs &&
           maxRetries == other.maxRetries &&
           temperature == other.temperature &&
           maxTokens == other.maxTokens &&
@@ -4028,10 +4233,14 @@ class ModerationRequest {
   /// Model ID (e.g., `"text-moderation-latest"`). Optional; API uses default if unset.
   final String? model;
 
-  const ModerationRequest({required this.input, this.model});
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
+  const ModerationRequest({required this.input, this.model, this.extraBody});
 
   @override
-  int get hashCode => input.hashCode ^ model.hashCode;
+  int get hashCode => input.hashCode ^ model.hashCode ^ extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4039,7 +4248,8 @@ class ModerationRequest {
       other is ModerationRequest &&
           runtimeType == other.runtimeType &&
           input == other.input &&
-          model == other.model;
+          model == other.model &&
+          extraBody == other.extraBody;
 }
 
 /// Response from the moderation endpoint.
@@ -4198,11 +4408,16 @@ class OcrRequest {
   /// Whether to include base64-encoded images of each processed page.
   final bool? includeImageBase64;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const OcrRequest({
     required this.model,
     required this.document,
     this.pages,
     this.includeImageBase64,
+    this.extraBody,
   });
 
   @override
@@ -4210,7 +4425,8 @@ class OcrRequest {
       model.hashCode ^
       document.hashCode ^
       pages.hashCode ^
-      includeImageBase64.hashCode;
+      includeImageBase64.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4220,7 +4436,8 @@ class OcrRequest {
           model == other.model &&
           document == other.document &&
           pages == other.pages &&
-          includeImageBase64 == other.includeImageBase64;
+          includeImageBase64 == other.includeImageBase64 &&
+          extraBody == other.extraBody;
 }
 
 /// An OCR response.
@@ -4479,7 +4696,16 @@ class RateLimitConfig {
 }
 
 /// Controls how much reasoning effort the model should use.
-enum ReasoningEffort { low, medium, high, minimal, max }
+enum ReasoningEffort {
+  low,
+  medium,
+  high,
+  minimal,
+  max,
+
+  /// Turn reasoning off. Providers that cannot turn reasoning off return their own error.
+  none,
+}
 
 /// Result of a [`refresh_catalog`] call.
 enum RefreshOutcome {
@@ -4527,12 +4753,17 @@ class RerankRequest {
   /// Include the document content in results. Defaults to false.
   final bool? returnDocuments;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const RerankRequest({
     required this.model,
     required this.query,
     required this.documents,
     this.topN,
     this.returnDocuments,
+    this.extraBody,
   });
 
   @override
@@ -4541,7 +4772,8 @@ class RerankRequest {
       query.hashCode ^
       documents.hashCode ^
       topN.hashCode ^
-      returnDocuments.hashCode;
+      returnDocuments.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4552,7 +4784,8 @@ class RerankRequest {
           query == other.query &&
           documents == other.documents &&
           topN == other.topN &&
-          returnDocuments == other.returnDocuments;
+          returnDocuments == other.returnDocuments &&
+          extraBody == other.extraBody;
 }
 
 /// Response from the rerank endpoint.
@@ -4586,7 +4819,7 @@ class RerankResult {
   /// Original document index in the input list.
   final PlatformInt64 index;
 
-  /// Relevance score in `[0, 1]`. Higher indicates more relevant.
+  /// Relevance score. Higher indicates more relevant. Most providers use `[0, 1]`; NVIDIA NIM sends a raw logit.
   final double relevanceScore;
 
   /// Original document content (if `return_documents` was true).
@@ -4786,7 +5019,7 @@ class ResponseUsage {
 
 /// A search request.
 class SearchRequest {
-  /// The model/provider to use (e.g. `"brave/web-search"`, `"tavily/search"`).
+  /// The model/provider to use (e.g. `"brave/web-search"`).
   final String model;
 
   /// The search query string.
@@ -4801,12 +5034,17 @@ class SearchRequest {
   /// Country code for localized results (ISO 3166-1 alpha-2, e.g., `"US"`, `"FR"`).
   final String? country;
 
+  /// Provider-specific parameters merged into the request body, as chat's
+  /// `extra_body` is. Keys here override identically named fields.
+  final String? extraBody;
+
   const SearchRequest({
     required this.model,
     required this.query,
     this.maxResults,
     this.searchDomainFilter,
     this.country,
+    this.extraBody,
   });
 
   @override
@@ -4815,7 +5053,8 @@ class SearchRequest {
       query.hashCode ^
       maxResults.hashCode ^
       searchDomainFilter.hashCode ^
-      country.hashCode;
+      country.hashCode ^
+      extraBody.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4826,7 +5065,8 @@ class SearchRequest {
           query == other.query &&
           maxResults == other.maxResults &&
           searchDomainFilter == other.searchDomainFilter &&
-          country == other.country;
+          country == other.country &&
+          extraBody == other.extraBody;
 }
 
 /// A search response.
@@ -5024,7 +5264,8 @@ class StreamDelta {
 /// The streaming wire format a provider uses for its response stream.
 ///
 /// Most providers use standard Server-Sent Events (SSE).  AWS Bedrock uses
-/// a proprietary binary EventStream framing.
+/// a proprietary binary EventStream framing.  Ollama's native API streams
+/// newline-delimited JSON.
 ///
 /// Deserialized from the `streaming_format` JSON field via [`serde`].
 enum StreamFormat {
@@ -5033,6 +5274,9 @@ enum StreamFormat {
 
   /// AWS EventStream binary framing (application/vnd.amazon.eventstream).
   awsEventStream,
+
+  /// Newline-delimited JSON (application/x-ndjson): one JSON object per line.
+  ndjson,
 }
 
 /// Partial function call details in a stream.
