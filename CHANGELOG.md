@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-24
+
 ### Changed
 
 - `ollama/` (and its alias `ollama_chat/`) now uses Ollama's own API, `/api/chat` and `/api/embed`, instead of the
@@ -102,6 +104,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reject distrusted emSign certificate chains by updating TLS validation and bundled trust stores
   (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+
+### Not in this release
+
+These tests stay skipped until alef, the binding generator, fixes the generated test code:
+
+- The parts reply test in Go, C, Java and Kotlin reads the parts through an accessor the binding does not have
+  (xberg-io/alef#688).
+- The Ruby empty response body test names an error class the extension does not define (xberg-io/alef#687).
+- The streamed usage test, in 11 bindings, does not read usage from the last chunk (xberg-io/alef#689).
+- Two wasm file tests: the create-file skip is stale, and the file-content test needs a test-config override.
+
+Two Swift binding defects are open in alef and ship unchanged in this release:
+
+- The Swift binding has no public member that returns the parts of a reply, so its parts reply test is also skipped
+  (xberg-io/alef#691).
+- In Swift, `result.choices()[0].message()` in one expression reads freed memory. Keep the list in a local variable
+  first (xberg-io/alef#693).
 
 ## [2.3.0] - 2026-10-19
 

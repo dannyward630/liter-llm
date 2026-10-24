@@ -1,5 +1,4 @@
 {
-  "plugin": "liter-llm",
   "mcp": {
     "liter-llm": {
       "type": "local",
