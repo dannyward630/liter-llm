@@ -1508,7 +1508,7 @@ mod error_tests {
     }
 
     #[test]
-    fn numeric_error_code_keeps_context_window_detection() {
+    fn numeric_error_code_detects_context_window_through_the_message() {
         let err = LiterLlmError::from_status(
             400,
             r#"{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed","status":"INVALID_ARGUMENT"}}"#,
@@ -1548,6 +1548,38 @@ mod error_tests {
             r#"{"error":{"code":"insufficient_quota","message":"quota exhausted"}}"#,
             None,
         );
+        assert!(matches!(err, LiterLlmError::ProviderQuotaExceeded { status: 429, .. }));
+    }
+
+    #[test]
+    fn string_context_length_exceeded_code_selects_context_window() {
+        // The message holds no context-window fragment, so only the code can decide.
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":"context_length_exceeded","message":"request rejected"}}"#,
+            None,
+        );
+        assert!(matches!(&err, LiterLlmError::ContextWindowExceeded { message } if message == "request rejected"));
+    }
+
+    #[test]
+    fn string_content_filter_code_selects_content_policy() {
+        // The message holds no policy fragment, so only the code can decide.
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":"content_filter","message":"request rejected"}}"#,
+            None,
+        );
+        assert!(matches!(&err, LiterLlmError::ContentPolicy { message } if message == "request rejected"));
+    }
+
+    #[test]
+    fn insufficient_quota_code_without_a_string_message_is_quota_exceeded() {
+        // The code is the authoritative signal; the body is kept as the message.
+        let body = r#"{"error":{"code":"insufficient_quota","message":42}}"#;
+        let err = LiterLlmError::from_status(429, body, None);
+        assert!(matches!(&err, LiterLlmError::ProviderQuotaExceeded { status: 429, message } if message == body));
+        let err = LiterLlmError::from_status(429, r#"{"error":{"code":"insufficient_quota"}}"#, None);
         assert!(matches!(err, LiterLlmError::ProviderQuotaExceeded { status: 429, .. }));
     }
 
