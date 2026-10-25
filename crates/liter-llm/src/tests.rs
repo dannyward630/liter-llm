@@ -1480,6 +1480,34 @@ mod error_tests {
     }
 
     #[test]
+    fn google_invalid_api_key_with_http_400_is_authentication() {
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID","domain":"googleapis.com"}]}}"#,
+            None,
+        );
+
+        assert!(matches!(
+            &err,
+            LiterLlmError::Authentication { message, status: 400 }
+                if message == "API key not valid. Please pass a valid API key."
+        ));
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_type(), "Authentication");
+    }
+
+    #[test]
+    fn other_google_http_400_remains_bad_request() {
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":400,"message":"Invalid argument","status":"INVALID_ARGUMENT","details":[{"reason":"INVALID_ARGUMENT"}]}}"#,
+            None,
+        );
+
+        assert!(matches!(err, LiterLlmError::BadRequest { status: 400, .. }));
+    }
+
+    #[test]
     fn error_from_429() {
         let err = LiterLlmError::from_status(
             429,
