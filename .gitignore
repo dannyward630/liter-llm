@@ -340,10 +340,12 @@ poly.local.toml
 .github/instructions/least-privilege.instructions.md
 .github/instructions/logging-tracing.instructions.md
 .github/instructions/minimal-changes.instructions.md
+.github/instructions/model-catalog.instructions.md
 .github/instructions/no-ai-signatures.instructions.md
 .github/instructions/output-awareness.instructions.md
 .github/instructions/php.instructions.md
 .github/instructions/prove-the-check-fired.instructions.md
+.github/instructions/proxy.instructions.md
 .github/instructions/python.instructions.md
 .github/instructions/r.instructions.md
 .github/instructions/read-before-write.instructions.md

@@ -4,7 +4,7 @@
 version = 1
 ai_rulez_version = '5.6.3'
 scope = 'all'
-tree = 'sha256:1a9ad7053eaee0a55de82618565f383ba8e2064bc0c9af8acb68743b5f84206c'
+tree = 'sha256:408b0216aeb4b7017e876df71bb2002674e18a66b7c4bb8993dc5963c84ea40e'
 
 [[include]]
 name = 'xberg-cicd'
@@ -232,6 +232,18 @@ name = 'xberg-brand-and-docs'
 source = 'include:xberg-core/skills/xberg-brand-and-docs/SKILL.md'
 commit = 'bca4b4e8f1f198bef25308aaabf7a2c238a387a3'
 digest = 'sha256:552648a1d89cccb6bc3d47cb25f3b6355f75a104936fc70668fdb6167868c965'
+
+[[item]]
+kind = 'rule'
+id = 'model-catalog'
+path = 'rules/model-catalog.md'
+digest = 'sha256:646426b91418105f99be0ccc019f737c8cbe6d31cad87b18f5d1b1329538a6de'
+
+[[item]]
+kind = 'rule'
+id = 'proxy'
+path = 'rules/proxy.md'
+digest = 'sha256:f907385573b84a84ccad8cb5a20f3bcfecec8cdd51fbc9ae4a9abf18eab636db'
 
 [[item]]
 kind = 'settings'
