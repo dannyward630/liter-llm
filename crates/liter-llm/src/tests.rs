@@ -1508,6 +1508,60 @@ mod error_tests {
     }
 
     #[test]
+    fn numeric_error_code_keeps_context_window_detection() {
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed","status":"INVALID_ARGUMENT"}}"#,
+            None,
+        );
+        assert!(matches!(
+            &err,
+            LiterLlmError::ContextWindowExceeded { message }
+                if message == "The input token count exceeds the maximum number of tokens allowed"
+        ));
+    }
+
+    #[test]
+    fn numeric_error_code_keeps_content_policy_detection() {
+        let err = LiterLlmError::from_status(
+            400,
+            r#"{"error":{"code":400,"message":"blocked by content_filter","status":"INVALID_ARGUMENT"}}"#,
+            None,
+        );
+        assert!(matches!(&err, LiterLlmError::ContentPolicy { message } if message == "blocked by content_filter"));
+    }
+
+    #[test]
+    fn numeric_error_code_rate_limit_keeps_the_message() {
+        let err = LiterLlmError::from_status(
+            429,
+            r#"{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}"#,
+            None,
+        );
+        assert!(matches!(&err, LiterLlmError::RateLimited { message, .. } if message == "Resource exhausted"));
+    }
+
+    #[test]
+    fn string_insufficient_quota_code_still_selects_quota_exceeded() {
+        let err = LiterLlmError::from_status(
+            429,
+            r#"{"error":{"code":"insufficient_quota","message":"quota exhausted"}}"#,
+            None,
+        );
+        assert!(matches!(err, LiterLlmError::ProviderQuotaExceeded { status: 429, .. }));
+    }
+
+    #[test]
+    fn invalid_key_reason_outside_a_400_keeps_the_status_kind() {
+        let err = LiterLlmError::from_status(
+            500,
+            r#"{"error":{"code":500,"message":"backend error","details":[{"reason":"API_KEY_INVALID"}]}}"#,
+            None,
+        );
+        assert!(matches!(err, LiterLlmError::ServerError { status: 500, .. }));
+    }
+
+    #[test]
     fn error_from_429() {
         let err = LiterLlmError::from_status(
             429,
